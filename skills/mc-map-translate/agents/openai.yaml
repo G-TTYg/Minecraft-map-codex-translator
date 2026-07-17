@@ -1,0 +1,4 @@
+interface:
+  display_name: "MC Map Translate"
+  short_description: "Translate Java Minecraft maps with context-aware Codex localization."
+  default_prompt: "Use $mc-map-translate to localize this Java Minecraft map to my target locale."

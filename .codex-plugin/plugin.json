@@ -1,0 +1,38 @@
+{
+  "name": "minecraft-map-codex-translator",
+  "version": "0.1.0",
+  "description": "Java Edition Minecraft map localization workflows for Codex, with resource-pack-first export and optional copied-map patching.",
+  "author": {
+    "name": "G-TTYg",
+    "url": "https://github.com/G-TTYg"
+  },
+  "homepage": "https://github.com/G-TTYg/Minecraft-map-codex-translator",
+  "repository": "https://github.com/G-TTYg/Minecraft-map-codex-translator",
+  "license": "MIT",
+  "keywords": [
+    "minecraft",
+    "localization",
+    "translation",
+    "resource-pack",
+    "codex-skill"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Minecraft Map Translator",
+    "shortDescription": "Localize Minecraft maps with context-aware Codex workflows.",
+    "longDescription": "Minecraft Map Translator guides Codex through professional Java Edition map localization: scan text, preserve commands and formatting, build glossary and context, use the user-requested target locale, prefer non-invasive resource-pack output, and only patch copied world data when explicitly requested.",
+    "developerName": "G-TTYg",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Local"
+    ],
+    "defaultPrompt": [
+      "Use $mc-map-translate to localize this Java map to my target locale.",
+      "Use $mc-map-translate to build a resource-pack translation export.",
+      "Use $mc-map-translate to QA an MC map translation workpack."
+    ],
+    "brandColor": "#2E7D32"
+  }
+}
