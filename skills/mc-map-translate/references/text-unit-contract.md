@@ -18,6 +18,7 @@ Use JSON Lines (`.jsonl`). Each non-empty line is one text unit.
   "source_locale": "en_us",
   "mode_support": ["hybrid-key-injection", "embedded-direct"],
   "protected": [],
+  "segments": [],
   "context": {},
   "confidence": "high",
   "notes": ""
@@ -38,6 +39,7 @@ Use JSON Lines (`.jsonl`). Each non-empty line is one text unit.
 - `source_locale`: Source locale for language JSON units, normally `en_us` unless the user specifies another source.
 - `mode_support`: Which export modes can handle this unit: `resource-pack`, `hybrid-key-injection`, `embedded-direct`.
 - `protected`: Tokens that must survive unchanged.
+- `segments`: Optional per-`text` translation slots for grouped components with multiple hardcoded text nodes.
 - `context`: Speaker, quest, nearby text, page order, command-chain group, or other context used for translation.
 - `confidence`: `high`, `medium`, or `low`.
 - `notes`: Human/agent notes, ambiguities, or QA concerns.
@@ -60,9 +62,34 @@ For grouped JSON text components, `context` may include:
 }
 ```
 
-Translate `raw` as the complete player-facing message. Use `text_nodes` only to understand how the message is split across styled fragments.
+Translate `raw` as the complete player-facing message. Use `text_nodes` to understand how the message is split across styled fragments.
 
-For `hybrid-key-injection`, the bundled apply tool currently patches only units with exactly one `text_nodes` entry. Multi-node grouped components are still useful for translation context, but automatic key injection skips them to avoid flattening styles, events, selectors, scores, or other dynamic structure.
+For grouped components with more than one hardcoded `text` node, scanner output or `prepare-segments` may add:
+
+```json
+{
+  "segments": [
+    {
+      "index": 0,
+      "json_path": "$[0].text",
+      "raw": "Open ",
+      "translation": "",
+      "translation_key": "mcmap.example.tellraw.abc123.part_0"
+    },
+    {
+      "index": 1,
+      "json_path": "$[1].text",
+      "raw": "the door",
+      "translation": "",
+      "translation_key": "mcmap.example.tellraw.abc123.part_1"
+    }
+  ]
+}
+```
+
+Codex should translate `raw` first as the whole message, then fill each `segments[].translation` according to that full-message translation and the surrounding component context. Do not translate segment text as isolated words when it is part of a sentence.
+
+For `hybrid-key-injection`, `apply-hybrid-keys --multi-text-mode split-nodes` replaces each segment's original `text` node with its `translation_key`, preserving surrounding styles, selectors, scores, click/hover events, keybinds, and `extra`.
 
 ## Binary Anchors
 
@@ -87,5 +114,7 @@ Final translation files may contain the same schema with `translation` filled. F
 - `resource-pack` units must include `translation_key`.
 - `resource_namespace` should be present for every unit that can be exported to a resource pack.
 - `translation` must preserve every protected token exactly.
+- `segments[].json_path` and `segments[].raw` must match `context.text_nodes`.
+- `segments[].translation_key` must use only lowercase `a-z`, digits, `_`, `.`, and `-`.
 - `edition` must be `java`.
 - JSON strings must remain valid UTF-8.

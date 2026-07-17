@@ -30,6 +30,15 @@ If a term appears in lore and gameplay instructions, choose one translation that
 - Preserve newline shape unless a UI-length issue requires a controlled change.
 - Preserve JSON text component styling and events.
 
+## Multi-Text Components
+
+Some JSON text components split one visible message across several `text` nodes so each part can have a different color, event, selector, or score insertion. For rows with `segments[]`:
+
+- Translate the full `raw` message first and store that in `translation`.
+- Fill `segments[].translation` from the full-message translation, not from isolated word-by-word translation.
+- Preserve the original component order because `split-nodes` keeps selectors, scores, and styled fragments in place.
+- If the target language cannot read naturally in the original segment order, leave the difficult segment translations empty and note that the unit needs a future compose/direct rewrite instead of forcing bad phrasing.
+
 ## Creative Text
 
 - Riddles, jokes, poems, acronyms, and wordplay may need adaptation rather than direct translation.

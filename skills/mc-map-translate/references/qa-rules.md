@@ -22,6 +22,7 @@ Use this reference before apply or export.
 - Glossary terms are consistent.
 - Duplicate language keys have identical intended meaning or are split.
 - Grouped text components are translated as complete messages, not as isolated style fragments.
+- For `segments[]`, the full unit `translation` and each segment translation should agree semantically; segment translations should not read like unedited word-by-word fragments.
 
 ## Coverage QA
 
@@ -47,7 +48,7 @@ For any world patch, report:
 - Parser confidence.
 - Known unhandled source kinds.
 - Commands or text components that could not be safely transformed.
-- `multiple_text_nodes`, `source_text_mismatch`, `existing_translate_conflict`, and other skip reasons from the hybrid apply report.
+- `segment_count_mismatch`, `segment_source_text_mismatch`, `existing_translate_conflict`, `multiple_text_nodes`, and other skip reasons from the hybrid apply report.
 
 ## Workpack QA
 

@@ -14,8 +14,11 @@ The plugin includes its own standard tools. Do not depend on MCC-i18n or copy it
 - `validate-units`: validate `translation_units.jsonl` or `translations.jsonl`.
 - `summarize-units`: summarize translation coverage.
 - `make-workpacks`: split units into stable JSONL translation batches.
+- `prepare-segments`: add `segments[]` translation slots for grouped components with multiple hardcoded `text` nodes.
 - `export-table`: export selected units to UTF-8 TSV.
 - `import-table`: merge TSV translations back into JSONL by `id`.
+- `export-segment-table`: export multi-text segment slots to UTF-8 TSV.
+- `import-segment-table`: merge translated segment TSV files back into JSONL.
 - `make-resource-pack`: create `pack.mcmeta` and target language JSON files from translations. By default it exports only units that can work in resource-pack mode; pass `--include-hybrid-keys` only when a copied-map key-injection apply step will use those generated keys.
 
 `scripts/mcmap_java_tools.py`:
@@ -34,6 +37,7 @@ python skills/mc-map-translate/scripts/mcmap_java_tools.py scan <world-or-zip> -
 python skills/mc-map-translate/scripts/mcmap_contract.py validate-units <workdir>/translation_units.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py summarize-units <workdir>/translation_units.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py make-workpacks <workdir>/translation_units.jsonl --out-dir <workdir>/workpacks --max-units 200 --dedupe-raw
+python skills/mc-map-translate/scripts/mcmap_contract.py prepare-segments <workdir>/translation_units.jsonl --out <workdir>/translations.segmented.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py export-table <workdir>/translation_units.jsonl --out <workdir>/translations.tsv
 ```
 
@@ -47,6 +51,8 @@ python skills/mc-map-translate/scripts/mcmap_java_tools.py zip-resource-pack <wo
 For hybrid key-injection preparation:
 
 ```bash
+python skills/mc-map-translate/scripts/mcmap_contract.py export-segment-table <workdir>/translations.segmented.jsonl --out <workdir>/segments.tsv
+python skills/mc-map-translate/scripts/mcmap_contract.py import-segment-table <workdir>/segments.tsv --base <workdir>/translations.segmented.jsonl --out <workdir>/translations.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack <workdir>/translations.jsonl --out <workdir>/exports/hybrid-resource-pack --pack-format <pack_format> --target <target_locale> --include-hybrid-keys
 ```
 
@@ -76,10 +82,13 @@ Supported automatic patches:
 
 Safety limits:
 
-- Only hardcoded JSON text component units with exactly one `context.text_nodes[]` entry are injected automatically.
-- The target `text` value must still exactly equal `raw`; otherwise the unit is skipped.
-- Existing `translate` conflicts, missing paths, unsafe paths, nested `resources.zip!` paths, and multi-`text` components are skipped and reported.
+- Single-node hardcoded JSON text components use the unit `translation_key`.
+- Multi-node hardcoded JSON text components use `segments[]` by default through `--multi-text-mode split-nodes`.
+- Every target `text` value must still exactly equal the recorded source segment; otherwise the unit is skipped.
+- Existing `translate` conflicts, missing paths, unsafe paths, nested `resources.zip!` paths, and missing/invalid segment keys are skipped and reported.
 - Plain NBT strings without JSON text component context are not hybrid-key-injection targets; they require explicit `embedded-direct` handling.
+
+Use `--multi-text-mode skip` only when you want the old conservative behavior for audit or comparison.
 
 ## Coverage Limits
 

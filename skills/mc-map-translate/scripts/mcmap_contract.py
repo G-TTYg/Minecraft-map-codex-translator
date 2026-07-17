@@ -132,6 +132,7 @@ def validate_unit(unit: dict[str, Any]) -> list[str]:
                 if str(token) not in str(translation):
                     errors.append(f"line {line}: protected token missing from translation: {token}")
 
+    errors.extend(validate_segments(unit))
     return errors
 
 
@@ -206,22 +207,129 @@ def normalize_key_piece(value: str) -> str:
     return value or "text"
 
 
+def default_segment_key(row: dict[str, Any], index: int) -> str:
+    base_key = str(row.get("translation_key") or "")
+    if not base_key:
+        namespace = normalize_key_piece(str(row.get("resource_namespace") or "mcmap"))
+        source_kind = normalize_key_piece(str(row.get("source_kind", "text")))
+        row_id = normalize_key_piece(str(row.get("id") or stable_id(str(row.get("source_file", "")), str(row.get("raw", "")))))
+        base_key = f"{namespace}.{source_kind}.{row_id}"
+    return f"{base_key}.part_{index}"
+
+
+def text_nodes_for_row(row: dict[str, Any]) -> list[dict[str, Any]]:
+    context = row.get("context") if isinstance(row.get("context"), dict) else {}
+    text_nodes = context.get("text_nodes") if isinstance(context, dict) else []
+    return [node for node in text_nodes if isinstance(node, dict)]
+
+
+def ensure_segments(row: dict[str, Any], overwrite: bool = False) -> bool:
+    text_nodes = text_nodes_for_row(row)
+    if len(text_nodes) <= 1:
+        return False
+    if row.get("segments") and not overwrite:
+        return False
+
+    existing_by_path: dict[str, dict[str, Any]] = {}
+    if isinstance(row.get("segments"), list):
+        for item in row["segments"]:
+            if isinstance(item, dict) and isinstance(item.get("json_path"), str):
+                existing_by_path[item["json_path"]] = item
+
+    segments: list[dict[str, Any]] = []
+    for index, node in enumerate(text_nodes):
+        json_path = str(node.get("json_path", ""))
+        existing = existing_by_path.get(json_path, {})
+        segments.append(
+            {
+                "index": index,
+                "json_path": json_path,
+                "raw": str(node.get("text", "")),
+                "translation": str(existing.get("translation", "")),
+                "translation_key": str(existing.get("translation_key") or default_segment_key(row, index)),
+            }
+        )
+    row["segments"] = segments
+    return True
+
+
+def segment_entries(row: dict[str, Any]) -> list[dict[str, Any]]:
+    segments = row.get("segments")
+    if not isinstance(segments, list):
+        return []
+    return [segment for segment in segments if isinstance(segment, dict)]
+
+
+def validate_segments(unit: dict[str, Any]) -> list[str]:
+    line = unit.get("_line_no", "?")
+    errors: list[str] = []
+    if "segments" not in unit:
+        return errors
+    segments = unit.get("segments")
+    if not isinstance(segments, list):
+        return [f"line {line}: segments must be a list when present"]
+
+    text_nodes = text_nodes_for_row(unit)
+    text_by_path = {str(node.get("json_path", "")): str(node.get("text", "")) for node in text_nodes}
+    seen_keys: set[str] = set()
+    seen_paths: set[str] = set()
+
+    for offset, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            errors.append(f"line {line}: segments[{offset}] must be an object")
+            continue
+        index = segment.get("index")
+        if not isinstance(index, int) or index < 0:
+            errors.append(f"line {line}: segments[{offset}].index must be a non-negative integer")
+        json_path = segment.get("json_path")
+        if not isinstance(json_path, str) or not json_path:
+            errors.append(f"line {line}: segments[{offset}].json_path is required")
+            continue
+        if json_path in seen_paths:
+            errors.append(f"line {line}: duplicate segment json_path: {json_path}")
+        seen_paths.add(json_path)
+        raw = str(segment.get("raw", ""))
+        if json_path in text_by_path and raw != text_by_path[json_path]:
+            errors.append(f"line {line}: segments[{offset}].raw does not match context.text_nodes for {json_path}")
+        key = str(segment.get("translation_key", ""))
+        if not key:
+            errors.append(f"line {line}: segments[{offset}].translation_key is required")
+        elif not KEY_RE.match(key):
+            errors.append(f"line {line}: segments[{offset}].translation_key contains unsupported characters: {key}")
+        elif key in seen_keys:
+            errors.append(f"line {line}: duplicate segment translation_key: {key}")
+        seen_keys.add(key)
+
+    return errors
+
+
 def iter_pack_entries(
     rows: Iterable[dict[str, Any]],
     generate_missing_keys: bool,
     namespace: str,
     include_hybrid_keys: bool,
-) -> Iterable[tuple[str, str, str, str]]:
+) -> Iterable[tuple[str, str, str, str, str, str]]:
     for row in rows:
         modes = row.get("mode_support", [])
         if "resource-pack" not in modes and not include_hybrid_keys:
             continue
+
+        resource_namespace = str(row.get("resource_namespace") or namespace)
+        row_id = str(row.get("id", ""))
+
+        if include_hybrid_keys:
+            for segment in segment_entries(row):
+                raw_segment = str(segment.get("raw", ""))
+                translated_segment = str(segment.get("translation", "")).strip()
+                key_segment = str(segment.get("translation_key", ""))
+                if translated_segment and key_segment:
+                    yield resource_namespace, key_segment, raw_segment, translated_segment, row_id, "segment"
+
         raw = str(row.get("raw", ""))
         translation = str(row.get("translation", "")).strip()
         if not translation:
             continue
 
-        resource_namespace = str(row.get("resource_namespace") or namespace)
         key = row.get("translation_key")
         if not key and generate_missing_keys:
             source_kind = normalize_key_piece(str(row.get("source_kind", "text")))
@@ -231,7 +339,7 @@ def iter_pack_entries(
         if not key:
             continue
 
-        yield resource_namespace, str(key), raw, translation
+        yield resource_namespace, str(key), raw, translation, row_id, "unit"
 
 
 def make_resource_pack(args: argparse.Namespace) -> int:
@@ -245,8 +353,15 @@ def make_resource_pack(args: argparse.Namespace) -> int:
     errors: list[str] = []
     lang_by_namespace: dict[str, dict[str, str]] = {}
     source_by_namespace: dict[str, dict[str, str]] = {}
+    emitted_unit_ids: set[str] = set()
+    segment_entry_count = 0
 
-    for namespace, key, raw, translated in iter_pack_entries(rows, args.generate_missing_keys, args.namespace, args.include_hybrid_keys):
+    for namespace, key, raw, translated, row_id, entry_kind in iter_pack_entries(
+        rows,
+        args.generate_missing_keys,
+        args.namespace,
+        args.include_hybrid_keys,
+    ):
         if not KEY_RE.match(namespace):
             errors.append(f"invalid resource namespace: {namespace}")
             continue
@@ -260,6 +375,10 @@ def make_resource_pack(args: argparse.Namespace) -> int:
             continue
         lang[key] = translated
         source_lang[key] = raw
+        if row_id:
+            emitted_unit_ids.add(row_id)
+        if entry_kind == "segment":
+            segment_entry_count += 1
 
     if errors:
         for error in errors:
@@ -290,7 +409,8 @@ def make_resource_pack(args: argparse.Namespace) -> int:
         "source_locale": args.source_locale,
         "namespace_count": len(lang_by_namespace),
         "entry_count": sum(len(items) for items in lang_by_namespace.values()),
-        "skipped_without_translation_or_key": len(rows) - sum(len(items) for items in lang_by_namespace.values()),
+        "segment_entry_count": segment_entry_count,
+        "rows_without_pack_entries": sum(1 for row in rows if str(row.get("id", "")) not in emitted_unit_ids),
         "include_hybrid_keys": args.include_hybrid_keys,
         "hardcoded_units_not_included": sum(
             1
@@ -302,6 +422,41 @@ def make_resource_pack(args: argparse.Namespace) -> int:
     print(f"resource_pack: {out}")
     print(f"namespaces: {len(lang_by_namespace)}")
     print(f"entries: {sum(len(items) for items in lang_by_namespace.values())}")
+    return 0
+
+
+def prepare_segments(args: argparse.Namespace) -> int:
+    rows = read_jsonl(Path(args.units).resolve())
+    out = Path(args.out).resolve()
+    selected = selected_rows(rows, args)
+    selected_ids = {str(row.get("id", "")) for row in selected}
+
+    changed_units = 0
+    segment_count = 0
+    for row in rows:
+        if str(row.get("id", "")) not in selected_ids:
+            continue
+        if "hybrid-key-injection" not in row.get("mode_support", []):
+            continue
+        if ensure_segments(row, overwrite=args.overwrite):
+            changed_units += 1
+        segment_count += len(segment_entries(row))
+
+    write_jsonl(out, rows)
+    report = {
+        "schema": "mc-map-translate-segment-prepare-report.v1",
+        "created_at": utc_now(),
+        "source_units": str(Path(args.units).resolve()),
+        "output": str(out),
+        "selected_units": len(selected),
+        "changed_units": changed_units,
+        "segment_count": segment_count,
+        "overwrite": args.overwrite,
+    }
+    write_json(out.with_suffix(out.suffix + ".segment_report.json"), report)
+    print(f"segmented_units: {out}")
+    print(f"changed_units: {changed_units}")
+    print(f"segments: {segment_count}")
     return 0
 
 
@@ -456,6 +611,111 @@ def import_table(args: argparse.Namespace) -> int:
     return 0
 
 
+def export_segment_table(args: argparse.Namespace) -> int:
+    rows = selected_rows(read_jsonl(Path(args.units).resolve()), args)
+    out = Path(args.out).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fields = [
+        "unit_id",
+        "segment_index",
+        "json_path",
+        "raw",
+        "translation",
+        "translation_key",
+        "unit_raw",
+        "unit_translation",
+        "source_kind",
+        "source_file",
+        "confidence",
+        "notes",
+    ]
+    count = 0
+    with out.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, dialect="excel-tab", extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            if "hybrid-key-injection" not in row.get("mode_support", []):
+                continue
+            ensure_segments(row)
+            segments = segment_entries(row)
+            if len(segments) <= 1:
+                continue
+            for segment in segments:
+                writer.writerow(
+                    {
+                        "unit_id": row.get("id", ""),
+                        "segment_index": segment.get("index", ""),
+                        "json_path": segment.get("json_path", ""),
+                        "raw": segment.get("raw", ""),
+                        "translation": segment.get("translation", ""),
+                        "translation_key": segment.get("translation_key", ""),
+                        "unit_raw": row.get("raw", ""),
+                        "unit_translation": row.get("translation", ""),
+                        "source_kind": row.get("source_kind", ""),
+                        "source_file": row.get("source_file", ""),
+                        "confidence": row.get("confidence", ""),
+                        "notes": row.get("notes", ""),
+                    }
+                )
+                count += 1
+    print(f"segment_table: {out}")
+    print(f"segments: {count}")
+    return 0
+
+
+def import_segment_table(args: argparse.Namespace) -> int:
+    base_rows = read_jsonl(Path(args.base).resolve())
+    table_path = Path(args.table).resolve()
+    out = Path(args.out).resolve()
+    by_id = {str(row.get("id", "")): row for row in base_rows}
+    updates: dict[tuple[str, int], str] = {}
+    unit_translation_updates: dict[str, str] = {}
+
+    with table_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle, dialect="excel-tab")
+        for row in reader:
+            unit_id = str(row.get("unit_id", "")).strip()
+            if not unit_id:
+                continue
+            try:
+                index = int(str(row.get("segment_index", "")).strip())
+            except ValueError:
+                continue
+            translation = row.get("translation", "")
+            if translation or args.allow_empty_translation:
+                updates[(unit_id, index)] = translation
+            unit_translation = row.get("unit_translation", "")
+            if unit_translation:
+                unit_translation_updates[unit_id] = unit_translation
+
+    changed = 0
+    for unit_id, unit_translation in unit_translation_updates.items():
+        row = by_id.get(unit_id)
+        if row is not None and row.get("translation") != unit_translation:
+            row["translation"] = unit_translation
+            changed += 1
+
+    for unit_id, index in sorted(updates):
+        row = by_id.get(unit_id)
+        if row is None:
+            continue
+        ensure_segments(row)
+        segments = segment_entries(row)
+        for segment in segments:
+            if segment.get("index") != index:
+                continue
+            translation = updates[(unit_id, index)]
+            if segment.get("translation") != translation:
+                segment["translation"] = translation
+                changed += 1
+            break
+
+    write_jsonl(out, base_rows)
+    print(f"translations: {out}")
+    print(f"updated_segment_fields: {changed}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MC map localization contract helpers")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -482,6 +742,16 @@ def build_parser() -> argparse.ArgumentParser:
     pack.add_argument("--generate-missing-keys", action="store_true", help="generate keys for translated units without translation_key")
     pack.add_argument("--include-hybrid-keys", action="store_true", help="include hardcoded units that need copied-map key injection to take effect")
     pack.set_defaults(func=make_resource_pack)
+
+    segments = subparsers.add_parser("prepare-segments", help="add segment translation slots for multi-text JSON component units")
+    segments.add_argument("units", help="translation_units.jsonl or translations.jsonl")
+    segments.add_argument("--out", required=True, help="output JSONL with segments[] scaffolds")
+    segments.add_argument("--mode", choices=sorted(VALID_MODES), default="", help="filter by supported export mode")
+    segments.add_argument("--source-kind", default="", help="comma-separated source_kind filter")
+    segments.add_argument("--source-file-regex", default="", help="regex filter for source_file")
+    segments.add_argument("--untranslated-only", action="store_true", help="only include units with empty translation")
+    segments.add_argument("--overwrite", action="store_true", help="regenerate existing segments[] entries")
+    segments.set_defaults(func=prepare_segments)
 
     summary = subparsers.add_parser("summarize-units", help="summarize unit coverage")
     summary.add_argument("units", help="translation units JSONL")
@@ -513,6 +783,22 @@ def build_parser() -> argparse.ArgumentParser:
     import_cmd.add_argument("--out", required=True, help="output translations JSONL")
     import_cmd.add_argument("--allow-empty-translation", action="store_true", help="allow TSV empty translations to overwrite existing translations")
     import_cmd.set_defaults(func=import_table)
+
+    export_segments = subparsers.add_parser("export-segment-table", help="export multi-text segment slots to UTF-8 TSV")
+    export_segments.add_argument("units", help="translation units JSONL")
+    export_segments.add_argument("--out", required=True, help="output TSV path")
+    export_segments.add_argument("--mode", choices=sorted(VALID_MODES), default="", help="filter by supported export mode")
+    export_segments.add_argument("--source-kind", default="", help="comma-separated source_kind filter")
+    export_segments.add_argument("--source-file-regex", default="", help="regex filter for source_file")
+    export_segments.add_argument("--untranslated-only", action="store_true", help="only include units with empty translation")
+    export_segments.set_defaults(func=export_segment_table)
+
+    import_segments = subparsers.add_parser("import-segment-table", help="merge translated segment TSV back into JSONL by unit id and segment index")
+    import_segments.add_argument("table", help="translated segment TSV from export-segment-table")
+    import_segments.add_argument("--base", required=True, help="base translation units JSONL")
+    import_segments.add_argument("--out", required=True, help="output translations JSONL")
+    import_segments.add_argument("--allow-empty-translation", action="store_true", help="allow TSV empty segment translations to overwrite existing segment translations")
+    import_segments.set_defaults(func=import_segment_table)
 
     return parser
 

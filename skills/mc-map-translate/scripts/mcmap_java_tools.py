@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-from mcmap_contract import normalize_key_piece, read_jsonl, require_locale, stable_id, utc_now, write_json
+from mcmap_contract import ensure_segments, normalize_key_piece, read_jsonl, require_locale, stable_id, utc_now, write_json
 
 
 LANG_PATH_RE = re.compile(r"(?:^|.*[!/])assets/([^/]+)/lang/([a-z]{2,3}_[a-z0-9]{2,8})\.json$")
@@ -451,6 +451,8 @@ def is_probably_internal(value: str) -> bool:
         return True
     if stripped.startswith("minecraft:"):
         return True
+    if stripped.endswith(":") and re.search(r"[A-Za-z\u0080-\uffff]", stripped):
+        return False
     if " " not in stripped and (":" in stripped or "/" in stripped) and INTERNAL_ID_RE.match(stripped.lower()):
         return True
     return False
@@ -755,6 +757,92 @@ def inject_key_into_json_component(obj: Any, row: dict[str, Any]) -> tuple[bool,
     return True, "changed"
 
 
+def row_segments(row: dict[str, Any]) -> list[dict[str, Any]]:
+    ensure_segments(row)
+    segments = row.get("segments")
+    if not isinstance(segments, list):
+        return []
+    return [segment for segment in segments if isinstance(segment, dict)]
+
+
+def replace_text_with_translate(parent: dict[str, Any], key: str) -> None:
+    updated = {"translate": key}
+    for child_key, child_value in parent.items():
+        if child_key != "text":
+            updated[child_key] = child_value
+    parent.clear()
+    parent.update(updated)
+
+
+def inject_segments_into_json_component(obj: Any, row: dict[str, Any]) -> tuple[bool, str]:
+    text_nodes = [
+        node
+        for node in (row.get("context", {}).get("text_nodes", []) if isinstance(row.get("context"), dict) else [])
+        if isinstance(node, dict)
+    ]
+    if len(text_nodes) <= 1:
+        return inject_key_into_json_component(obj, row)
+
+    segments = row_segments(row)
+    if len(segments) != len(text_nodes):
+        return False, "segment_count_mismatch"
+
+    text_by_path = {str(node.get("json_path", "")): str(node.get("text", "")) for node in text_nodes}
+    operations: list[tuple[dict[str, Any], str]] = []
+    already = 0
+    seen_paths: set[str] = set()
+    seen_keys: set[str] = set()
+
+    for segment in segments:
+        text_path = str(segment.get("json_path", ""))
+        expected = str(segment.get("raw", ""))
+        key = str(segment.get("translation_key", "")).strip()
+        if not text_path or not key:
+            return False, "missing_segment_path_or_key"
+        if text_path in seen_paths:
+            return False, "duplicate_segment_path"
+        if key in seen_keys:
+            return False, "duplicate_segment_key"
+        seen_paths.add(text_path)
+        seen_keys.add(key)
+        if text_by_path.get(text_path) != expected:
+            return False, "segment_raw_mismatch"
+        try:
+            parent_path, leaf = parent_json_path(text_path)
+            parent = get_json_path(obj, parent_path)
+        except (KeyError, ValueError) as exc:
+            return False, f"segment_json_path_missing:{exc}"
+        if leaf != "text" or not isinstance(parent, dict):
+            return False, "segment_not_object_text_field"
+        if parent.get("translate") == key and "text" not in parent:
+            already += 1
+            continue
+        if "translate" in parent and parent.get("translate") != key:
+            return False, "existing_segment_translate_conflict"
+        if parent.get("text") != expected:
+            return False, "segment_source_text_mismatch"
+        operations.append((parent, key))
+
+    if already == len(segments):
+        return False, "already_applied"
+    for parent, key in operations:
+        replace_text_with_translate(parent, key)
+    return True, "changed"
+
+
+def inject_component_for_unit(obj: Any, row: dict[str, Any], multi_text_mode: str) -> tuple[bool, str]:
+    text_nodes = [
+        node
+        for node in (row.get("context", {}).get("text_nodes", []) if isinstance(row.get("context"), dict) else [])
+        if isinstance(node, dict)
+    ]
+    if len(text_nodes) <= 1:
+        return inject_key_into_json_component(obj, row)
+    if multi_text_mode == "split-nodes":
+        return inject_segments_into_json_component(obj, row)
+    return False, "multiple_text_nodes"
+
+
 def dump_json_component(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
@@ -781,21 +869,21 @@ def text_component_units(
         if is_player_text(raw):
             address = {**base_address, "json_path": json_path}
             temp_id = stable_id(source_file, json.dumps(address, sort_keys=True), raw)
-            units.append(
-                make_unit(
-                    edition="java",
-                    source_kind=source_kind,
-                    source_file=source_file,
-                    address=address,
-                    raw=raw,
-                    mode_support=["hybrid-key-injection", "embedded-direct"],
-                    confidence=confidence,
-                    resource_namespace=namespace,
-                    translation_key=generated_key(namespace, map_slug, source_kind, temp_id),
-                    context=context,
-                    notes=notes or "Hardcoded text component; resource-pack-only output requires key injection.",
-                )
+            unit = make_unit(
+                edition="java",
+                source_kind=source_kind,
+                source_file=source_file,
+                address=address,
+                raw=raw,
+                mode_support=["hybrid-key-injection", "embedded-direct"],
+                confidence=confidence,
+                resource_namespace=namespace,
+                translation_key=generated_key(namespace, map_slug, source_kind, temp_id),
+                context=context,
+                notes=notes or "Hardcoded text component; resource-pack-only output requires key injection.",
             )
+            ensure_segments(unit)
+            units.append(unit)
         return units
 
     for item in translate_keys:
@@ -1333,8 +1421,9 @@ def scan_source(args: argparse.Namespace) -> int:
 
 
 class ApplyState:
-    def __init__(self, *, dry_run: bool):
+    def __init__(self, *, dry_run: bool, multi_text_mode: str):
         self.dry_run = dry_run
+        self.multi_text_mode = multi_text_mode
         self.changed_units = 0
         self.already_applied = 0
         self.skipped: Counter[str] = Counter()
@@ -1382,6 +1471,13 @@ def confidence_allows(row: dict[str, Any], min_confidence: str) -> bool:
     return CONFIDENCE_RANK.get(value, 0) >= CONFIDENCE_RANK[min_confidence]
 
 
+def row_has_translation(row: dict[str, Any]) -> bool:
+    if str(row.get("translation", "")).strip():
+        return True
+    segments = row_segments(row)
+    return bool(segments) and all(str(segment.get("translation", "")).strip() for segment in segments)
+
+
 def select_hybrid_rows(rows: list[dict[str, Any]], args: argparse.Namespace) -> tuple[list[dict[str, Any]], Counter[str]]:
     selected: list[dict[str, Any]] = []
     skipped: Counter[str] = Counter()
@@ -1404,7 +1500,7 @@ def select_hybrid_rows(rows: list[dict[str, Any]], args: argparse.Namespace) -> 
         if not str(row.get("translation_key", "")).strip():
             skipped["missing_translation_key"] += 1
             continue
-        if args.translated_only and not str(row.get("translation", "")).strip():
+        if args.translated_only and not row_has_translation(row):
             skipped["missing_translation"] += 1
             continue
         if not confidence_allows(row, args.min_confidence):
@@ -1471,7 +1567,7 @@ def patch_json_span(value: str, start: int, end: int, row: dict[str, Any], state
     except json.JSONDecodeError as exc:
         state.mark_skip(row, "command_span_json_parse_failed", str(exc))
         return value, False
-    changed, reason = inject_key_into_json_component(obj, row)
+    changed, reason = inject_component_for_unit(obj, row, state.multi_text_mode)
     if not changed:
         if reason == "already_applied":
             state.mark_already(row)
@@ -1493,7 +1589,7 @@ def patch_full_json_text(value: str, row: dict[str, Any], state: ApplyState) -> 
     except json.JSONDecodeError as exc:
         state.mark_skip(row, "json_text_parse_failed", str(exc))
         return value, False
-    changed, reason = inject_key_into_json_component(obj, row)
+    changed, reason = inject_component_for_unit(obj, row, state.multi_text_mode)
     if not changed:
         if reason == "already_applied":
             state.mark_already(row)
@@ -1555,7 +1651,7 @@ def patch_json_file(path: Path, source_file: str, rows: list[dict[str, Any]], st
 
     changed_file = False
     for row in rows:
-        changed, reason = inject_key_into_json_component(obj, row)
+        changed, reason = inject_component_for_unit(obj, row, state.multi_text_mode)
         changed_file = note_json_apply_result(row, source_file, changed, reason, state) or changed_file
 
     if changed_file and not state.dry_run:
@@ -1869,7 +1965,7 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
             out.unlink()
 
     rows, selection_skipped = select_hybrid_rows(read_jsonl(translations), args)
-    state = ApplyState(dry_run=args.dry_run)
+    state = ApplyState(dry_run=args.dry_run, multi_text_mode=args.multi_text_mode)
 
     if args.report:
         report_path = Path(args.report).resolve()
@@ -1909,6 +2005,7 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
         "output": str(out),
         "translations_file": str(translations),
         "dry_run": args.dry_run,
+        "multi_text_mode": args.multi_text_mode,
         "selected_units": len(rows),
         "selection_skipped": dict(sorted(selection_skipped.items())),
         "changed_units": state.changed_units,
@@ -2003,6 +2100,12 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--translations", required=True, help="translation_units.jsonl or translations.jsonl containing hybrid units")
     apply.add_argument("--out", required=True, help="copied world output directory or .zip")
     apply.add_argument("--resource-pack", default="", help="optional resource-pack directory to embed as resources.zip in the copied world")
+    apply.add_argument(
+        "--multi-text-mode",
+        choices=["split-nodes", "skip"],
+        default="split-nodes",
+        help="how to handle grouped components with multiple hardcoded text nodes",
+    )
     apply.add_argument("--min-confidence", choices=["low", "medium", "high"], default="medium", help="minimum scanner confidence to apply")
     apply.add_argument("--source-kind", default="", help="comma-separated source_kind filter")
     apply.add_argument("--unit-id", default="", help="comma-separated unit id filter")

@@ -57,6 +57,7 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - Keep role names, place names, item names, puzzle terms, factions, and UI verbs consistent.
    - Preserve all protected tokens exactly unless a reference says they are safe to translate.
    - For puzzles, riddles, rhymes, lore, and jokes, preserve player experience over word-for-word meaning.
+   - For units with `segments[]`, translate `raw` as the complete message first, then fill each `segments[].translation` so the preserved Minecraft component order still reads naturally.
 
 5. Export safely.
    - In `resource-pack` mode, generate only language/resource files and a QA report.
@@ -77,8 +78,11 @@ Use `scripts/mcmap_contract.py` for deterministic project scaffolding, JSONL val
 python skills/mc-map-translate/scripts/mcmap_contract.py init-workspace path/to/world --out work/mymap --target ja_jp
 python skills/mc-map-translate/scripts/mcmap_contract.py validate-units work/mymap/translation_units.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py make-workpacks work/mymap/translation_units.jsonl --out-dir work/mymap/workpacks --max-units 200
+python skills/mc-map-translate/scripts/mcmap_contract.py prepare-segments work/mymap/translation_units.jsonl --out work/mymap/translations.segmented.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py export-table work/mymap/translation_units.jsonl --out work/mymap/translations.tsv
 python skills/mc-map-translate/scripts/mcmap_contract.py import-table work/mymap/translations.tsv --base work/mymap/translation_units.jsonl --out work/mymap/translations.jsonl
+python skills/mc-map-translate/scripts/mcmap_contract.py export-segment-table work/mymap/translations.segmented.jsonl --out work/mymap/segments.tsv
+python skills/mc-map-translate/scripts/mcmap_contract.py import-segment-table work/mymap/segments.tsv --base work/mymap/translations.segmented.jsonl --out work/mymap/translations.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack work/mymap/translations.jsonl --out work/mymap/export/resource-pack --pack-format 34 --namespace mcmap --target ja_jp
 python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack work/mymap/translations.jsonl --out work/mymap/export/hybrid-resource-pack --pack-format 34 --namespace mcmap --target ja_jp --include-hybrid-keys
 ```
@@ -97,7 +101,7 @@ python skills/mc-map-translate/scripts/mcmap_java_tools.py embed-resource-pack p
 
 Use scanner output files directly: `translation_units.jsonl`, `scan_report.json`, `scan_review.md`, `glossary.md`, and generated `workpacks/*.jsonl`. If a parser is not yet available for a source kind, report missing parser coverage instead of pretending low-confidence extraction is reliable.
 
-`apply-hybrid-keys` is intentionally conservative. It copies/extracts the world, patches the copy, and writes `mcmap_hybrid_apply_report.json`. It injects keys only when a unit has an exact JSON text component anchor and exactly one hardcoded `text` node, preserving the rest of that component node such as color, click/hover events, selectors, keybinds, and `extra`. It skips multi-`text` components instead of flattening or discarding style.
+`apply-hybrid-keys` is intentionally conservative. It copies/extracts the world, patches the copy, and writes `mcmap_hybrid_apply_report.json`. For single-node text components it injects the unit `translation_key`. For multi-node grouped components it uses `segments[]` and the default `--multi-text-mode split-nodes` to replace each hardcoded `text` node with its segment `translation_key`, preserving sibling selectors, scores, colors, events, keybinds, and `extra`.
 
 ## Hard Rules
 

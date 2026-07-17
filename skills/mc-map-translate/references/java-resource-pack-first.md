@@ -21,7 +21,7 @@ Use this reference when the target is Java Edition and the user wants a non-inva
 - The bundled `apply-hybrid-keys` tool performs exact-anchor key injection in a copied world or copied map zip.
 - `make-resource-pack` includes these generated hardcoded-text keys only when called with `--include-hybrid-keys`.
 
-`apply-hybrid-keys` is conservative: it injects a key into a hardcoded JSON text component only when the scanner recorded one exact `text` node for that unit and the source still matches. Components split across multiple hardcoded `text` nodes are skipped and reported so a future segment-aware pass can handle them without flattening style or losing dynamic content.
+`apply-hybrid-keys` is conservative but segment-aware. Single-node hardcoded components use the unit key. Multi-node hardcoded components use `segments[]` and `--multi-text-mode split-nodes` to inject one key per original `text` node, preserving styles and dynamic sibling components. If segment anchors or source text do not match, the unit is skipped and reported.
 
 `embedded-direct`:
 

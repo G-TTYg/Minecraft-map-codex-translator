@@ -7,6 +7,7 @@ The plugin provides the `mc-map-translate` skill plus deterministic scripts for:
 - inspecting Java map folders or zip packages;
 - scanning language JSON, datapack JSON text components, `.mcfunction` commands, `.dat` NBT, and supported `.mca` chunks;
 - creating translation workpacks and TSV review tables;
+- preparing and importing multi-text segment translations for AI-assisted fine localization;
 - exporting resource-pack language files;
 - safely applying hybrid translation-key injection to copied worlds or copied map zips.
 
@@ -14,7 +15,7 @@ The plugin provides the `mc-map-translate` skill plus deterministic scripts for:
 
 The default workflow is resource-pack-first. Original maps are never edited in place.
 
-Hybrid key injection is available when hardcoded JSON text components must be made resource-pack-addressable. The apply tool copies or extracts the source map, then changes supported hardcoded text nodes to generated `translate` keys. Multi-`text` components and ambiguous anchors are skipped and reported instead of being flattened.
+Hybrid key injection is available when hardcoded JSON text components must be made resource-pack-addressable. The apply tool copies or extracts the source map, then changes supported hardcoded text nodes to generated `translate` keys. Multi-`text` components are handled through `segments[]`: Codex translates the full message with context, fills per-segment translations, and the tool injects one key per original text node while preserving component styling and dynamic siblings.
 
 Bedrock Edition is not supported yet.
 
@@ -25,6 +26,9 @@ python skills/mc-map-translate/scripts/mcmap_java_tools.py inspect path/to/world
 python skills/mc-map-translate/scripts/mcmap_java_tools.py scan path/to/world-or-map.zip --out work/map --target zh_cn --source-locale en_us --map-slug map
 python skills/mc-map-translate/scripts/mcmap_contract.py validate-units work/map/translation_units.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py make-workpacks work/map/translation_units.jsonl --out-dir work/map/workpacks --dedupe-raw
+python skills/mc-map-translate/scripts/mcmap_contract.py prepare-segments work/map/translation_units.jsonl --out work/map/translations.segmented.jsonl
+python skills/mc-map-translate/scripts/mcmap_contract.py export-segment-table work/map/translations.segmented.jsonl --out work/map/segments.tsv
+python skills/mc-map-translate/scripts/mcmap_contract.py import-segment-table work/map/segments.tsv --base work/map/translations.segmented.jsonl --out work/map/translations.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack work/map/translations.jsonl --out work/map/exports/hybrid-resource-pack --pack-format 34 --target zh_cn --include-hybrid-keys
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world-or-map.zip --translations work/map/translations.jsonl --out work/map/exports/world-keyed.zip
 ```
