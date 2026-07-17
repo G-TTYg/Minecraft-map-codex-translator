@@ -6,7 +6,8 @@ The plugin provides the `mc-map-translate` skill plus deterministic scripts for:
 
 - inspecting Java map folders or zip packages;
 - scanning language JSON, datapack JSON text components, `.mcfunction` commands, `.dat` NBT, and supported `.mca` chunks;
-- creating translation workpacks and TSV review tables;
+- creating indexed multi-file translation projects, contextual workpacks, and TSV review tables;
+- merging staged translation parts back into a canonical translations JSONL;
 - preparing and importing multi-text segment translations for AI-assisted fine localization;
 - exporting resource-pack language files;
 - safely applying hybrid translation-key injection to copied worlds or copied map zips.
@@ -23,15 +24,15 @@ Bedrock Edition is not supported yet.
 
 ```bash
 python skills/mc-map-translate/scripts/mcmap_java_tools.py inspect path/to/world-or-map.zip
-python skills/mc-map-translate/scripts/mcmap_java_tools.py scan path/to/world-or-map.zip --out work/map --target zh_cn --source-locale en_us --map-slug map
+python skills/mc-map-translate/scripts/mcmap_java_tools.py scan path/to/world-or-map.zip --out work/map --target zh_cn --source-locale en_us --map-slug map --project-layout --max-workpack-units 120
 python skills/mc-map-translate/scripts/mcmap_contract.py validate-units work/map/translation_units.jsonl
-python skills/mc-map-translate/scripts/mcmap_contract.py make-workpacks work/map/translation_units.jsonl --out-dir work/map/workpacks --dedupe-raw
-python skills/mc-map-translate/scripts/mcmap_contract.py prepare-segments work/map/translation_units.jsonl --out work/map/translations.segmented.jsonl
-python skills/mc-map-translate/scripts/mcmap_contract.py export-segment-table work/map/translations.segmented.jsonl --out work/map/segments.tsv
-python skills/mc-map-translate/scripts/mcmap_contract.py import-segment-table work/map/segments.tsv --base work/map/translations.segmented.jsonl --out work/map/translations.jsonl
-python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack work/map/translations.jsonl --out work/map/exports/hybrid-resource-pack --pack-format 34 --target zh_cn --include-hybrid-keys
-python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world-or-map.zip --translations work/map/translations.jsonl --out work/map/exports/world-keyed.zip
+python skills/mc-map-translate/scripts/mcmap_contract.py translation-status work/map
+python skills/mc-map-translate/scripts/mcmap_contract.py merge-translations work/map/translations/parts --base work/map/translation_units.jsonl --out work/map/translations/translations.jsonl
+python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack work/map --out work/map/exports/hybrid-resource-pack --pack-format 34 --target zh_cn --include-hybrid-keys
+python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world-or-map.zip --translations work/map --out work/map/exports/world-keyed.zip --resource-pack work/map/exports/hybrid-resource-pack
 ```
+
+For large maps, Codex should treat `index/manifest.json` as the entry point, translate one `workpacks/contextual/workpack_###.jsonl` at a time, read only that workpack's listed source summaries, and write results into the matching `translations/parts/workpack_###.jsonl`.
 
 ## Validation
 

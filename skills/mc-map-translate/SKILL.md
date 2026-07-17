@@ -30,6 +30,7 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - For scanning Java world text, read `references/java-text-sources.md`.
    - For source-kind semantics and Minecraft Java text systems, read `references/java-edition-text-map.md`.
    - Before creating or validating JSONL workpacks, read `references/text-unit-contract.md`.
+   - Before staged translation of a real map, read `references/project-layout.md`.
    - Before using bundled CLI tools, read `references/tooling.md`.
    - Before translation, read `references/translation-style.md`.
    - Before apply/export, read `references/qa-rules.md`.
@@ -42,14 +43,16 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
 
 2. Scan and classify text.
    - Produce `translation_units.jsonl` following `references/text-unit-contract.md`.
+   - For normal real-map work, also produce the indexed multi-file project layout. Use `scan --project-layout` or run `make-project-files` after scanning.
    - Record exact anchors, not only raw strings or hashes.
    - Never treat regex over `.mca` bytes as authoritative; use a parser or mark results as low confidence.
    - Preserve command syntax, selectors, score names, NBT paths, JSON text component structure, colors, click events, hover events, newlines, and placeholders.
 
 3. Build context before translating.
+   - Do not load the whole map into model context. Use `index/manifest.json`, `index/unit_index.jsonl`, `index/source_index.jsonl`, source summaries, and one workpack at a time.
    - Cluster text by source file, coordinates, command-chain order, function call chain, book page order, dialogue speaker, quest, and repeated terminology.
    - Create or update `glossary.md` before translating substantial text.
-   - Translate in batches small enough to keep local context visible.
+   - Translate in batches small enough to keep local context visible. Write staged translations to `translations/parts/workpack_###.jsonl`, then merge by stable `id`.
 
 4. Translate like a localization editor.
    - Prefer natural player-facing target-language phrasing over literal source-language phrasing.
@@ -77,14 +80,17 @@ Use `scripts/mcmap_contract.py` for deterministic project scaffolding, JSONL val
 ```bash
 python skills/mc-map-translate/scripts/mcmap_contract.py init-workspace path/to/world --out work/mymap --target ja_jp
 python skills/mc-map-translate/scripts/mcmap_contract.py validate-units work/mymap/translation_units.jsonl
+python skills/mc-map-translate/scripts/mcmap_contract.py make-project-files work/mymap/translation_units.jsonl --out-dir work/mymap --max-units 120
+python skills/mc-map-translate/scripts/mcmap_contract.py translation-status work/mymap
 python skills/mc-map-translate/scripts/mcmap_contract.py make-workpacks work/mymap/translation_units.jsonl --out-dir work/mymap/workpacks --max-units 200
 python skills/mc-map-translate/scripts/mcmap_contract.py prepare-segments work/mymap/translation_units.jsonl --out work/mymap/translations.segmented.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py export-table work/mymap/translation_units.jsonl --out work/mymap/translations.tsv
 python skills/mc-map-translate/scripts/mcmap_contract.py import-table work/mymap/translations.tsv --base work/mymap/translation_units.jsonl --out work/mymap/translations.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py export-segment-table work/mymap/translations.segmented.jsonl --out work/mymap/segments.tsv
 python skills/mc-map-translate/scripts/mcmap_contract.py import-segment-table work/mymap/segments.tsv --base work/mymap/translations.segmented.jsonl --out work/mymap/translations.jsonl
-python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack work/mymap/translations.jsonl --out work/mymap/export/resource-pack --pack-format 34 --namespace mcmap --target ja_jp
-python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack work/mymap/translations.jsonl --out work/mymap/export/hybrid-resource-pack --pack-format 34 --namespace mcmap --target ja_jp --include-hybrid-keys
+python skills/mc-map-translate/scripts/mcmap_contract.py merge-translations work/mymap/translations/parts --base work/mymap/translation_units.jsonl --out work/mymap/translations/translations.jsonl
+python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack work/mymap/translations/translations.jsonl --out work/mymap/export/resource-pack --pack-format 34 --namespace mcmap --target ja_jp
+python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack work/mymap --out work/mymap/export/hybrid-resource-pack --pack-format 34 --namespace mcmap --target ja_jp --include-hybrid-keys
 ```
 
 Use `scripts/mcmap_java_tools.py` for Java-specific inspection, scanning, packaging, and copied-world resource embedding:
@@ -92,14 +98,18 @@ Use `scripts/mcmap_java_tools.py` for Java-specific inspection, scanning, packag
 ```bash
 python skills/mc-map-translate/scripts/mcmap_java_tools.py inspect path/to/world
 python skills/mc-map-translate/scripts/mcmap_java_tools.py scan path/to/world --out work/mymap --target ja_jp --map-slug mymap
+python skills/mc-map-translate/scripts/mcmap_java_tools.py scan path/to/world --out work/mymap --target ja_jp --map-slug mymap --project-layout --max-workpack-units 120
 python skills/mc-map-translate/scripts/mcmap_java_tools.py scan path/to/world --out work/mymap --target ja_jp --no-binary
-python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world --translations work/mymap/translations.jsonl --out work/mymap/exports/world-keyed --resource-pack work/mymap/exports/hybrid-resource-pack
-python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world.zip --translations work/mymap/translations.jsonl --out work/mymap/exports/world-keyed.zip
+python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world --translations work/mymap/translations/translations.jsonl --out work/mymap/exports/world-keyed --resource-pack work/mymap/exports/hybrid-resource-pack
+python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world --translations work/mymap --out work/mymap/exports/world-keyed --resource-pack work/mymap/exports/hybrid-resource-pack
+python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world.zip --translations work/mymap/translations/translations.jsonl --out work/mymap/exports/world-keyed.zip
 python skills/mc-map-translate/scripts/mcmap_java_tools.py zip-resource-pack work/mymap/exports/resource-pack --out work/mymap/exports/mymap-ja_jp-resourcepack.zip
 python skills/mc-map-translate/scripts/mcmap_java_tools.py embed-resource-pack path/to/world --resource-pack work/mymap/exports/resource-pack --out work/mymap/exports/world-with-resources
 ```
 
-Use scanner output files directly: `translation_units.jsonl`, `scan_report.json`, `scan_review.md`, `glossary.md`, and generated `workpacks/*.jsonl`. If a parser is not yet available for a source kind, report missing parser coverage instead of pretending low-confidence extraction is reliable.
+Use scanner output files directly: `translation_units.jsonl`, `scan_report.json`, `scan_review.md`, `glossary.md`, and the indexed project layout under `index/`, `context/`, `workpacks/contextual/`, and `translations/parts/`. If a parser is not yet available for a source kind, report missing parser coverage instead of pretending low-confidence extraction is reliable.
+
+For staged AI translation, treat `index/manifest.json` as the entry point. Load one workpack and its listed source summaries at a time, update the matching translation part, and use `merge-translations` before final validation/export. Export and apply commands can accept a merged JSONL file, a translation-parts directory, or the project root.
 
 `apply-hybrid-keys` is intentionally conservative. It copies/extracts the world, patches the copy, and writes `mcmap_hybrid_apply_report.json`. For single-node text components it injects the unit `translation_key`. For multi-node grouped components it uses `segments[]` and the default `--multi-text-mode split-nodes` to replace each hardcoded `text` node with its segment `translation_key`, preserving sibling selectors, scores, colors, events, keybinds, and `extra`.
 

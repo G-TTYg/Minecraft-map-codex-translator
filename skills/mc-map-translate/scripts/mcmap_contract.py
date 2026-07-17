@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 import sys
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -44,7 +45,60 @@ def stable_id(*parts: str) -> str:
     return hashlib.sha1(payload).hexdigest()[:12]
 
 
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
+def resolve_jsonl_inputs(path: Path) -> list[Path]:
+    path = path.resolve()
+    if path.is_file():
+        return [path]
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if not path.is_dir():
+        raise ValueError(f"expected a JSONL file or directory: {path}")
+
+    # Project directory: prefer finalized merged translations, then editable
+    # translation parts, then canonical scan units. This lets export/apply
+    # commands accept the project root without accidentally reading indexes.
+    if (path / "project.json").exists() or (path / "index" / "manifest.json").exists():
+        finalized = path / "translations" / "translations.jsonl"
+        if finalized.exists():
+            return [finalized]
+        manifest_path = path / "index" / "manifest.json"
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                manifest = {}
+            manifest_files: list[Path] = []
+            for pack in manifest.get("workpacks", []):
+                if not isinstance(pack, dict):
+                    continue
+                part = pack.get("translation_part")
+                if isinstance(part, str) and part:
+                    candidate = (path / part).resolve()
+                    if candidate.exists() and candidate.is_file():
+                        manifest_files.append(candidate)
+            if manifest_files:
+                return sorted(manifest_files)
+        parts = path / "translations" / "parts"
+        if parts.exists():
+            files = sorted(parts.glob("*.jsonl"))
+            if files:
+                return files
+        units = path / "translation_units.jsonl"
+        if units.exists():
+            return [units]
+
+    # Direct workpack/parts directories should read only immediate JSONL files.
+    files = sorted(
+        item
+        for item in path.glob("*.jsonl")
+        if item.is_file() and item.name not in {"unit_index.jsonl", "source_index.jsonl", "raw_repeats.jsonl"}
+    )
+    if files:
+        return files
+    raise FileNotFoundError(f"no readable JSONL inputs found in {path}")
+
+
+def read_jsonl_file(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if not path.exists():
         raise FileNotFoundError(path)
@@ -60,7 +114,15 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
             if not isinstance(value, dict):
                 raise ValueError(f"{path}:{line_no}: expected JSON object")
             value["_line_no"] = line_no
+            value["_source_path"] = str(path)
             rows.append(value)
+    return rows
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for input_path in resolve_jsonl_inputs(path):
+        rows.extend(read_jsonl_file(input_path))
     return rows
 
 
@@ -73,7 +135,7 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
-            clean = {key: value for key, value in row.items() if key != "_line_no"}
+            clean = {key: value for key, value in row.items() if not key.startswith("_")}
             handle.write(json.dumps(clean, ensure_ascii=False, sort_keys=True) + "\n")
 
 
@@ -503,6 +565,261 @@ def selected_rows(rows: list[dict[str, Any]], args: argparse.Namespace) -> list[
     return selected
 
 
+def relative_posix(path: Path, root: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def row_sort_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    return (str(row.get("source_file", "")), str(row.get("source_kind", "")), str(row.get("id", "")))
+
+
+def safe_group_filename(value: str, suffix: str = ".jsonl") -> str:
+    slug = normalize_key_piece(value.replace("!", "__").replace("/", "__").replace("\\", "__"))
+    digest = stable_id(value)
+    if len(slug) > 92:
+        slug = slug[:92].rstrip("_.-")
+    return f"{slug or 'group'}__{digest}{suffix}"
+
+
+def raw_preview(value: str, limit: int = 180) -> str:
+    clean = value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 3] + "..."
+
+
+def grouped_counts(rows: Iterable[dict[str, Any]], field: str) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for row in rows:
+        counts[str(row.get(field, "unknown"))] += 1
+    return dict(sorted(counts.items()))
+
+
+def grouped_mode_counts(rows: Iterable[dict[str, Any]]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for row in rows:
+        for mode in row.get("mode_support", []):
+            counts[str(mode)] += 1
+    return dict(sorted(counts.items()))
+
+
+def minimal_index_row(row: dict[str, Any], workpack_path: str = "", translation_part: str = "") -> dict[str, Any]:
+    segments = segment_entries(row)
+    return {
+        "id": row.get("id", ""),
+        "source_kind": row.get("source_kind", ""),
+        "source_file": row.get("source_file", ""),
+        "raw_preview": raw_preview(str(row.get("raw", ""))),
+        "translation_key": row.get("translation_key", ""),
+        "resource_namespace": row.get("resource_namespace", ""),
+        "mode_support": row.get("mode_support", []),
+        "confidence": row.get("confidence", ""),
+        "protected": row.get("protected", []),
+        "segment_count": len(segments),
+        "workpack": workpack_path,
+        "translation_part": translation_part,
+    }
+
+
+def write_source_summary(path: Path, source_file: str, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"# {source_file}",
+        "",
+        f"- Units: {len(rows)}",
+        f"- Source kinds: {', '.join(sorted({str(row.get('source_kind', 'unknown')) for row in rows}))}",
+        f"- Modes: {', '.join(sorted({str(mode) for row in rows for mode in row.get('mode_support', [])}))}",
+        "",
+        "## Units",
+        "",
+    ]
+    for row in sorted(rows, key=row_sort_key):
+        protected = row.get("protected", [])
+        protected_note = f" protected={json.dumps(protected, ensure_ascii=False)}" if protected else ""
+        lines.append(
+            f"- `{row.get('id', '')}` `{row.get('source_kind', '')}` `{row.get('confidence', '')}`{protected_note}: "
+            f"{raw_preview(str(row.get('raw', '')), 260)}"
+        )
+        segments = segment_entries(row)
+        if segments:
+            for segment in segments:
+                lines.append(
+                    f"  - segment `{segment.get('index', '')}` `{segment.get('json_path', '')}`: "
+                    f"{raw_preview(str(segment.get('raw', '')), 220)}"
+                )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def make_project_files(args: argparse.Namespace) -> int:
+    rows = selected_rows(read_jsonl(Path(args.units).resolve()), args)
+    out_dir = Path(args.out_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.prepare_segments:
+        for row in rows:
+            if "hybrid-key-injection" in row.get("mode_support", []):
+                ensure_segments(row)
+
+    rows.sort(key=row_sort_key)
+    index_dir = out_dir / "index"
+    units_dir = out_dir / "units"
+    by_source_dir = units_dir / "by-source"
+    by_kind_dir = units_dir / "by-kind"
+    context_dir = out_dir / "context" / "source-summaries"
+    workpack_dir = out_dir / "workpacks" / "contextual"
+    translation_parts_dir = out_dir / "translations" / "parts"
+
+    for directory in [index_dir, by_source_dir, by_kind_dir, context_dir, workpack_dir, translation_parts_dir]:
+        directory.mkdir(parents=True, exist_ok=True)
+
+    rows_by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    rows_by_kind: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        rows_by_source[str(row.get("source_file", "unknown"))].append(row)
+        rows_by_kind[str(row.get("source_kind", "unknown"))].append(row)
+
+    source_entries: list[dict[str, Any]] = []
+    source_file_lookup: dict[str, str] = {}
+    context_file_lookup: dict[str, str] = {}
+    for source_file, source_rows in sorted(rows_by_source.items()):
+        units_path = by_source_dir / safe_group_filename(source_file)
+        summary_path = context_dir / safe_group_filename(source_file, ".md")
+        write_jsonl(units_path, sorted(source_rows, key=row_sort_key))
+        write_source_summary(summary_path, source_file, source_rows)
+        source_rel = relative_posix(units_path, out_dir)
+        summary_rel = relative_posix(summary_path, out_dir)
+        source_file_lookup[source_file] = source_rel
+        context_file_lookup[source_file] = summary_rel
+        source_entries.append(
+            {
+                "source_file": source_file,
+                "unit_count": len(source_rows),
+                "source_kinds": sorted({str(row.get("source_kind", "")) for row in source_rows}),
+                "mode_support": sorted({str(mode) for row in source_rows for mode in row.get("mode_support", [])}),
+                "units_file": source_rel,
+                "context_summary": summary_rel,
+                "first_id": source_rows[0].get("id", "") if source_rows else "",
+                "last_id": source_rows[-1].get("id", "") if source_rows else "",
+            }
+        )
+
+    kind_entries: list[dict[str, Any]] = []
+    for source_kind, kind_rows in sorted(rows_by_kind.items()):
+        kind_path = by_kind_dir / safe_group_filename(source_kind)
+        write_jsonl(kind_path, sorted(kind_rows, key=row_sort_key))
+        kind_entries.append(
+            {
+                "source_kind": source_kind,
+                "unit_count": len(kind_rows),
+                "units_file": relative_posix(kind_path, out_dir),
+            }
+        )
+
+    workpacks: list[dict[str, Any]] = []
+    index_rows: list[dict[str, Any]] = []
+    for start in range(0, len(rows), args.max_units):
+        chunk = rows[start : start + args.max_units]
+        pack_no = len(workpacks) + 1
+        pack_path = workpack_dir / f"workpack_{pack_no:03d}.jsonl"
+        part_path = translation_parts_dir / f"workpack_{pack_no:03d}.jsonl"
+        write_jsonl(pack_path, chunk)
+        if args.overwrite_translation_parts or not part_path.exists():
+            write_jsonl(part_path, chunk)
+        pack_rel = relative_posix(pack_path, out_dir)
+        part_rel = relative_posix(part_path, out_dir)
+        source_files = sorted({str(row.get("source_file", "")) for row in chunk})
+        context_files = sorted({context_file_lookup[source_file] for source_file in source_files if source_file in context_file_lookup})
+        workpacks.append(
+            {
+                "file": pack_rel,
+                "translation_part": part_rel,
+                "unit_count": len(chunk),
+                "source_files": source_files,
+                "source_kinds": sorted({str(row.get("source_kind", "")) for row in chunk}),
+                "context_summaries": context_files,
+                "first_id": chunk[0].get("id", "") if chunk else "",
+                "last_id": chunk[-1].get("id", "") if chunk else "",
+            }
+        )
+        for row in chunk:
+            index_rows.append(minimal_index_row(row, pack_rel, part_rel))
+
+    raw_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        raw_groups[str(row.get("raw", ""))].append(row)
+    repeated_rows = [
+        {
+            "raw": raw,
+            "count": len(group),
+            "unit_ids": [str(row.get("id", "")) for row in group],
+            "source_kinds": sorted({str(row.get("source_kind", "")) for row in group}),
+            "source_files": sorted({str(row.get("source_file", "")) for row in group}),
+        }
+        for raw, group in raw_groups.items()
+        if len(group) > 1
+    ]
+    repeated_rows.sort(key=lambda item: (-int(item["count"]), str(item["raw"])))
+
+    write_jsonl(index_dir / "unit_index.jsonl", index_rows)
+    write_jsonl(index_dir / "source_index.jsonl", source_entries)
+    write_jsonl(index_dir / "kind_index.jsonl", kind_entries)
+    write_jsonl(index_dir / "raw_repeats.jsonl", repeated_rows)
+
+    instructions = [
+        "# Translation Project Instructions",
+        "",
+        "This folder is intentionally indexed. Do not load every file into model context.",
+        "",
+        "1. Read `index/manifest.json` and `glossary.md` first.",
+        "2. Pick one `workpacks/contextual/workpack_###.jsonl` entry from the manifest.",
+        "3. Read only the listed `context/source-summaries/*.md` files and any nearby source/kind index rows needed for that pack.",
+        "4. Fill `translation` in the matching `translations/parts/workpack_###.jsonl` file.",
+        "5. For `segments[]`, translate the full unit first, then fill each segment so the styled Minecraft component still reads naturally.",
+        "6. Run `merge-translations` after enough parts are translated, then validate and export from the merged file or the project root.",
+        "",
+    ]
+    (out_dir / "translation_instructions.md").write_text("\n".join(instructions), encoding="utf-8")
+
+    manifest = {
+        "schema": "mc-map-translate-indexed-project.v1",
+        "created_at": utc_now(),
+        "source_units": str(Path(args.units).resolve()),
+        "project_root": str(out_dir),
+        "total_units": len(rows),
+        "max_units_per_workpack": args.max_units,
+        "prepared_segments": args.prepare_segments,
+        "indexes": {
+            "unit_index": "index/unit_index.jsonl",
+            "source_index": "index/source_index.jsonl",
+            "kind_index": "index/kind_index.jsonl",
+            "raw_repeats": "index/raw_repeats.jsonl",
+        },
+        "directories": {
+            "units_by_source": "units/by-source",
+            "units_by_kind": "units/by-kind",
+            "source_summaries": "context/source-summaries",
+            "workpacks": "workpacks/contextual",
+            "translation_parts": "translations/parts",
+        },
+        "counts_by_kind": grouped_counts(rows, "source_kind"),
+        "counts_by_mode": grouped_mode_counts(rows),
+        "source_file_count": len(rows_by_source),
+        "workpack_count": len(workpacks),
+        "workpacks": workpacks,
+    }
+    write_json(index_dir / "manifest.json", manifest)
+
+    print(f"project_files: {out_dir}")
+    print(f"units: {len(rows)}")
+    print(f"sources: {len(rows_by_source)}")
+    print(f"workpacks: {len(workpacks)}")
+    print(f"translation_parts: {translation_parts_dir}")
+    return 0
+
+
 def make_workpacks(args: argparse.Namespace) -> int:
     rows = selected_rows(read_jsonl(Path(args.units).resolve()), args)
     out_dir = Path(args.out_dir).resolve()
@@ -716,6 +1033,224 @@ def import_segment_table(args: argparse.Namespace) -> int:
     return 0
 
 
+def merge_segment_updates(base_row: dict[str, Any], update_row: dict[str, Any], allow_empty: bool) -> int:
+    update_segments = update_row.get("segments")
+    if not isinstance(update_segments, list):
+        return 0
+    ensure_segments(base_row)
+    base_segments = segment_entries(base_row)
+    by_index = {segment.get("index"): segment for segment in base_segments}
+    by_path = {segment.get("json_path"): segment for segment in base_segments}
+    changed = 0
+
+    for update_segment in update_segments:
+        if not isinstance(update_segment, dict):
+            continue
+        target = by_index.get(update_segment.get("index")) or by_path.get(update_segment.get("json_path"))
+        if target is None:
+            continue
+        translation = str(update_segment.get("translation", ""))
+        if translation or allow_empty:
+            if target.get("translation") != translation:
+                target["translation"] = translation
+                changed += 1
+        key = str(update_segment.get("translation_key", ""))
+        if key and target.get("translation_key") != key:
+            target["translation_key"] = key
+            changed += 1
+    return changed
+
+
+def apply_translation_updates(
+    base_rows: list[dict[str, Any]],
+    update_rows: list[dict[str, Any]],
+    *,
+    allow_empty: bool = False,
+    allow_conflicts: bool = False,
+) -> tuple[int, int, list[dict[str, str]], list[str]]:
+    by_id = {str(row.get("id", "")): row for row in base_rows if row.get("id")}
+    seen_unit_translation: dict[str, str] = {}
+    seen_segment_translation: dict[tuple[str, int], str] = {}
+    changed = 0
+    unknown = 0
+    conflicts: list[dict[str, str]] = []
+    updated_ids: set[str] = set()
+
+    for update in update_rows:
+        row_id = str(update.get("id", "")).strip()
+        if not row_id or row_id not in by_id:
+            unknown += 1
+            continue
+        base = by_id[row_id]
+
+        translation = str(update.get("translation", ""))
+        if translation or allow_empty:
+            previous = seen_unit_translation.get(row_id)
+            if previous is not None and previous != translation:
+                conflicts.append({"id": row_id, "field": "translation", "first": previous, "second": translation})
+                if not allow_conflicts:
+                    continue
+            seen_unit_translation[row_id] = translation
+            if base.get("translation") != translation:
+                base["translation"] = translation
+                changed += 1
+                updated_ids.add(row_id)
+
+        notes = str(update.get("notes", ""))
+        if notes and base.get("notes") != notes:
+            base["notes"] = notes
+            changed += 1
+            updated_ids.add(row_id)
+
+        update_segments = update.get("segments")
+        if isinstance(update_segments, list):
+            for segment in update_segments:
+                if not isinstance(segment, dict):
+                    continue
+                index = segment.get("index")
+                if not isinstance(index, int):
+                    continue
+                segment_translation = str(segment.get("translation", ""))
+                if not segment_translation and not allow_empty:
+                    continue
+                key = (row_id, index)
+                previous = seen_segment_translation.get(key)
+                if previous is not None and previous != segment_translation:
+                    conflicts.append(
+                        {
+                            "id": row_id,
+                            "field": f"segments[{index}].translation",
+                            "first": previous,
+                            "second": segment_translation,
+                        }
+                    )
+                    if not allow_conflicts:
+                        continue
+                seen_segment_translation[key] = segment_translation
+            before = json.dumps(base.get("segments", []), ensure_ascii=False, sort_keys=True)
+            changed += merge_segment_updates(base, update, allow_empty)
+            after = json.dumps(base.get("segments", []), ensure_ascii=False, sort_keys=True)
+            if before != after:
+                updated_ids.add(row_id)
+
+    return changed, unknown, conflicts, sorted(updated_ids)
+
+
+def merge_translations(args: argparse.Namespace) -> int:
+    base_path = Path(args.base).resolve()
+    out = Path(args.out).resolve()
+    base_rows = read_jsonl(base_path)
+
+    update_rows: list[dict[str, Any]] = []
+    input_files: list[str] = []
+    for item in args.inputs:
+        input_path = Path(item).resolve()
+        files = resolve_jsonl_inputs(input_path)
+        input_files.extend(str(path) for path in files)
+        for file_path in files:
+            update_rows.extend(read_jsonl_file(file_path))
+
+    changed, unknown, conflicts, updated_ids = apply_translation_updates(
+        base_rows,
+        update_rows,
+        allow_empty=args.allow_empty_translation,
+        allow_conflicts=args.allow_conflicts,
+    )
+    if conflicts and not args.allow_conflicts:
+        for conflict in conflicts[:20]:
+            print(
+                f"conflict: {conflict['id']} {conflict['field']} has multiple translations",
+                file=sys.stderr,
+            )
+        print(f"merge blocked: {len(conflicts)} conflict(s)", file=sys.stderr)
+        return 1
+
+    write_jsonl(out, base_rows)
+    report = {
+        "schema": "mc-map-translate-merge-report.v1",
+        "created_at": utc_now(),
+        "base": str(base_path),
+        "inputs": input_files,
+        "output": str(out),
+        "base_units": len(base_rows),
+        "input_rows": len(update_rows),
+        "changed_fields": changed,
+        "updated_units": len(updated_ids),
+        "unknown_update_rows": unknown,
+        "conflicts": conflicts,
+    }
+    write_json(out.with_suffix(out.suffix + ".merge_report.json"), report)
+    print(f"translations: {out}")
+    print(f"input_rows: {len(update_rows)}")
+    print(f"updated_units: {len(updated_ids)}")
+    print(f"unknown_update_rows: {unknown}")
+    print(f"conflicts: {len(conflicts)}")
+    return 0
+
+
+def translation_status(args: argparse.Namespace) -> int:
+    base_rows = read_jsonl(Path(args.units).resolve())
+    rows = base_rows
+    if args.translations:
+        rows = [dict(row) for row in base_rows]
+        updates = read_jsonl(Path(args.translations).resolve())
+        apply_translation_updates(
+            rows,
+            updates,
+            allow_empty=args.allow_empty_translation,
+            allow_conflicts=True,
+        )
+
+    translated = [row for row in rows if str(row.get("translation", "")).strip()]
+    hybrid = [row for row in rows if "hybrid-key-injection" in row.get("mode_support", [])]
+    segment_units = [row for row in rows if segment_entries(row)]
+    translated_segments = 0
+    total_segments = 0
+    for row in segment_units:
+        for segment in segment_entries(row):
+            total_segments += 1
+            if str(segment.get("translation", "")).strip():
+                translated_segments += 1
+
+    by_kind: dict[str, dict[str, int]] = {}
+    for row in rows:
+        kind = str(row.get("source_kind", "unknown"))
+        item = by_kind.setdefault(kind, {"total": 0, "translated": 0})
+        item["total"] += 1
+        if str(row.get("translation", "")).strip():
+            item["translated"] += 1
+
+    by_source: list[dict[str, Any]] = []
+    rows_by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        rows_by_source[str(row.get("source_file", ""))].append(row)
+    for source_file, source_rows in rows_by_source.items():
+        count = len(source_rows)
+        done = sum(1 for row in source_rows if str(row.get("translation", "")).strip())
+        if not args.incomplete_only or done < count:
+            by_source.append({"source_file": source_file, "total": count, "translated": done, "remaining": count - done})
+    by_source.sort(key=lambda item: (-int(item["remaining"]), str(item["source_file"])))
+
+    status = {
+        "schema": "mc-map-translate-status.v1",
+        "created_at": utc_now(),
+        "total_units": len(rows),
+        "translated_units": len(translated),
+        "remaining_units": len(rows) - len(translated),
+        "hybrid_units": len(hybrid),
+        "segment_units": len(segment_units),
+        "translated_segments": translated_segments,
+        "total_segments": total_segments,
+        "by_source_kind": dict(sorted(by_kind.items())),
+        "top_sources": by_source[: args.top_sources],
+    }
+
+    if args.out:
+        write_json(Path(args.out).resolve(), status)
+    print(json.dumps(status, ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MC map localization contract helpers")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -756,6 +1291,27 @@ def build_parser() -> argparse.ArgumentParser:
     summary = subparsers.add_parser("summarize-units", help="summarize unit coverage")
     summary.add_argument("units", help="translation units JSONL")
     summary.set_defaults(func=summarize_units)
+
+    project = subparsers.add_parser("make-project-files", help="create indexed multi-file project layout from units")
+    project.add_argument("units", help="translation units JSONL, project dir, or workpack dir")
+    project.add_argument("--out-dir", required=True, help="project/work directory to populate")
+    project.add_argument("--max-units", type=int, default=120, help="maximum units per contextual workpack")
+    project.add_argument("--mode", choices=sorted(VALID_MODES), default="", help="filter by supported export mode")
+    project.add_argument("--source-kind", default="", help="comma-separated source_kind filter")
+    project.add_argument("--source-file-regex", default="", help="regex filter for source_file")
+    project.add_argument("--untranslated-only", action="store_true", help="only include units with empty translation")
+    project.add_argument(
+        "--no-prepare-segments",
+        dest="prepare_segments",
+        action="store_false",
+        help="do not scaffold segments[] for multi-text hybrid units",
+    )
+    project.add_argument(
+        "--overwrite-translation-parts",
+        action="store_true",
+        help="rewrite existing translations/parts files instead of preserving staged work",
+    )
+    project.set_defaults(func=make_project_files, prepare_segments=True)
 
     workpacks = subparsers.add_parser("make-workpacks", help="split units into translation workpack JSONL files")
     workpacks.add_argument("units", help="translation units JSONL")
@@ -799,6 +1355,23 @@ def build_parser() -> argparse.ArgumentParser:
     import_segments.add_argument("--out", required=True, help="output translations JSONL")
     import_segments.add_argument("--allow-empty-translation", action="store_true", help="allow TSV empty segment translations to overwrite existing segment translations")
     import_segments.set_defaults(func=import_segment_table)
+
+    merge = subparsers.add_parser("merge-translations", help="merge translated JSONL files/directories into one canonical translations JSONL")
+    merge.add_argument("inputs", nargs="+", help="translated workpack JSONL files, translation parts dirs, or a project dir")
+    merge.add_argument("--base", required=True, help="base translation_units.jsonl or project dir")
+    merge.add_argument("--out", required=True, help="output merged translations JSONL")
+    merge.add_argument("--allow-empty-translation", action="store_true", help="allow empty translations to overwrite existing translations")
+    merge.add_argument("--allow-conflicts", action="store_true", help="allow later conflicting translations to win")
+    merge.set_defaults(func=merge_translations)
+
+    status = subparsers.add_parser("translation-status", help="report translation coverage by kind, source, and segment slots")
+    status.add_argument("units", help="base units JSONL or project dir")
+    status.add_argument("--translations", default="", help="optional translated JSONL, parts dir, or project dir to overlay")
+    status.add_argument("--allow-empty-translation", action="store_true", help="allow empty translations to overwrite base while computing status")
+    status.add_argument("--incomplete-only", action="store_true", help="show only sources with remaining untranslated units")
+    status.add_argument("--top-sources", type=int, default=20, help="number of source files to include")
+    status.add_argument("--out", default="", help="optional JSON report output")
+    status.set_defaults(func=translation_status)
 
     return parser
 

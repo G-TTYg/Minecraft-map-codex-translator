@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-from mcmap_contract import ensure_segments, normalize_key_piece, read_jsonl, require_locale, stable_id, utc_now, write_json
+from mcmap_contract import ensure_segments, make_project_files, normalize_key_piece, read_jsonl, require_locale, stable_id, utc_now, write_json
 
 
 LANG_PATH_RE = re.compile(r"(?:^|.*[!/])assets/([^/]+)/lang/([a-z]{2,3}_[a-z0-9]{2,8})\.json$")
@@ -1412,6 +1412,20 @@ def scan_source(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
 
+    if args.project_layout:
+        project_args = argparse.Namespace(
+            units=str(unit_path),
+            out_dir=str(out),
+            max_units=args.max_workpack_units,
+            mode="",
+            source_kind="",
+            source_file_regex="",
+            untranslated_only=False,
+            prepare_segments=not args.no_prepare_segments,
+            overwrite_translation_parts=False,
+        )
+        make_project_files(project_args)
+
     print(f"workspace: {out}")
     print(f"units: {unit_path}")
     print(f"unit_count: {len(units)}")
@@ -2093,6 +2107,9 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--mode", choices=["resource-pack", "hybrid-key-injection", "embedded-direct"], default="resource-pack")
     scan.add_argument("--no-binary", action="store_true", help="skip .dat/.mca NBT scanning and report them as pending")
     scan.add_argument("--max-binary-errors", type=int, default=50, help="maximum binary parser warnings to keep in scan_report.json")
+    scan.add_argument("--project-layout", action="store_true", help="also create indexed multi-file project layout for staged AI translation")
+    scan.add_argument("--max-workpack-units", type=int, default=120, help="maximum units per contextual workpack when --project-layout is used")
+    scan.add_argument("--no-prepare-segments", action="store_true", help="do not scaffold segments[] when --project-layout is used")
     scan.set_defaults(func=scan_source)
 
     apply = subparsers.add_parser("apply-hybrid-keys", help="patch a copied Java world so hardcoded JSON text components use translation keys")

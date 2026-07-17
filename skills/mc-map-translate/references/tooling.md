@@ -4,7 +4,7 @@ Use this reference before running bundled scripts.
 
 ## Scope
 
-The plugin includes its own standard tools. Do not depend on MCC-i18n or copy its code into this plugin. The useful standardized pattern is: inspect, scan, create a workpack, translate with context, validate, export a resource pack, and optionally embed that resource pack into a copied Java world.
+The plugin includes its own standard tools. Do not depend on MCC-i18n or copy its code into this plugin. The useful standardized pattern is: inspect, scan, create an indexed project, translate one contextual workpack at a time, merge staged translations, validate, export a resource pack, and optionally embed that resource pack into a copied Java world.
 
 ## Tools
 
@@ -13,7 +13,10 @@ The plugin includes its own standard tools. Do not depend on MCC-i18n or copy it
 - `init-workspace`: create the standard project folder and `project.json`.
 - `validate-units`: validate `translation_units.jsonl` or `translations.jsonl`.
 - `summarize-units`: summarize translation coverage.
+- `make-project-files`: create the indexed multi-file project layout for staged AI translation.
 - `make-workpacks`: split units into stable JSONL translation batches.
+- `merge-translations`: merge translated JSONL files/directories back into one canonical translations JSONL by stable `id`.
+- `translation-status`: report coverage by unit, source kind, source file, and segment slots.
 - `prepare-segments`: add `segments[]` translation slots for grouped components with multiple hardcoded `text` nodes.
 - `export-table`: export selected units to UTF-8 TSV.
 - `import-table`: merge TSV translations back into JSONL by `id`.
@@ -24,7 +27,7 @@ The plugin includes its own standard tools. Do not depend on MCC-i18n or copy it
 `scripts/mcmap_java_tools.py`:
 
 - `inspect`: detect Java map/package markers and Bedrock-only markers.
-- `scan`: scan Java resource-pack language JSON, datapack JSON text components, `.mcfunction` JSON text components, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`.
+- `scan`: scan Java resource-pack language JSON, datapack JSON text components, `.mcfunction` JSON text components, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Pass `--project-layout` to also create the indexed multi-file layout.
 - `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy.
 - `zip-resource-pack`: zip a resource pack directory with the correct root.
 - `embed-resource-pack`: copy a Java world and add `resources.zip` to the copy.
@@ -33,34 +36,48 @@ The plugin includes its own standard tools. Do not depend on MCC-i18n or copy it
 
 ```bash
 python skills/mc-map-translate/scripts/mcmap_java_tools.py inspect <world-or-zip>
-python skills/mc-map-translate/scripts/mcmap_java_tools.py scan <world-or-zip> --out <workdir> --target <target_locale> --source-locale en_us --map-slug <slug>
+python skills/mc-map-translate/scripts/mcmap_java_tools.py scan <world-or-zip> --out <workdir> --target <target_locale> --source-locale en_us --map-slug <slug> --project-layout --max-workpack-units 120
 python skills/mc-map-translate/scripts/mcmap_contract.py validate-units <workdir>/translation_units.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py summarize-units <workdir>/translation_units.jsonl
-python skills/mc-map-translate/scripts/mcmap_contract.py make-workpacks <workdir>/translation_units.jsonl --out-dir <workdir>/workpacks --max-units 200 --dedupe-raw
-python skills/mc-map-translate/scripts/mcmap_contract.py prepare-segments <workdir>/translation_units.jsonl --out <workdir>/translations.segmented.jsonl
-python skills/mc-map-translate/scripts/mcmap_contract.py export-table <workdir>/translation_units.jsonl --out <workdir>/translations.tsv
+python skills/mc-map-translate/scripts/mcmap_contract.py translation-status <workdir>
 ```
 
-After Codex fills translations:
+Codex then translates staged batches:
+
+- read `index/manifest.json`;
+- load one `workpacks/contextual/workpack_###.jsonl`;
+- load only the `context_summaries` listed for that workpack;
+- write translations to the matching `translations/parts/workpack_###.jsonl`;
+- update `glossary.md` when terminology decisions are made.
+
+After Codex fills one or more translation parts:
 
 ```bash
-python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack <workdir>/translations.jsonl --out <workdir>/exports/resource-pack --pack-format <pack_format> --target <target_locale>
+python skills/mc-map-translate/scripts/mcmap_contract.py merge-translations <workdir>/translations/parts --base <workdir>/translation_units.jsonl --out <workdir>/translations/translations.jsonl
+python skills/mc-map-translate/scripts/mcmap_contract.py validate-units <workdir>/translations/translations.jsonl
+python skills/mc-map-translate/scripts/mcmap_contract.py translation-status <workdir>/translation_units.jsonl --translations <workdir>/translations/translations.jsonl --incomplete-only
+```
+
+If a translation part changes after `translations/translations.jsonl` exists, run `merge-translations` again before exporting from the project root.
+
+For standalone resource-pack export:
+
+```bash
+python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack <workdir> --out <workdir>/exports/resource-pack --pack-format <pack_format> --target <target_locale>
 python skills/mc-map-translate/scripts/mcmap_java_tools.py zip-resource-pack <workdir>/exports/resource-pack --out <workdir>/exports/resource-pack.zip
 ```
 
 For hybrid key-injection preparation:
 
 ```bash
-python skills/mc-map-translate/scripts/mcmap_contract.py export-segment-table <workdir>/translations.segmented.jsonl --out <workdir>/segments.tsv
-python skills/mc-map-translate/scripts/mcmap_contract.py import-segment-table <workdir>/segments.tsv --base <workdir>/translations.segmented.jsonl --out <workdir>/translations.jsonl
-python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack <workdir>/translations.jsonl --out <workdir>/exports/hybrid-resource-pack --pack-format <pack_format> --target <target_locale> --include-hybrid-keys
+python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack <workdir> --out <workdir>/exports/hybrid-resource-pack --pack-format <pack_format> --target <target_locale> --include-hybrid-keys
 ```
 
 Then patch a copied world or copied map zip:
 
 ```bash
-python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys <world-or-zip> --translations <workdir>/translations.jsonl --out <workdir>/exports/world-keyed --resource-pack <workdir>/exports/hybrid-resource-pack
-python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys <world-or-zip> --translations <workdir>/translations.jsonl --out <workdir>/exports/world-keyed.zip
+python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys <world-or-zip> --translations <workdir> --out <workdir>/exports/world-keyed --resource-pack <workdir>/exports/hybrid-resource-pack
+python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys <world-or-zip> --translations <workdir> --out <workdir>/exports/world-keyed.zip
 ```
 
 To ship a copied world with the pack embedded:
@@ -103,4 +120,9 @@ Use `--no-binary` when the map is huge, when a fast first pass is enough, or whe
 - `scan_report.json`: machine-readable counts, warnings, top files, repeated text, and binary coverage.
 - `scan_review.md`: human-readable triage summary.
 - `glossary.md`: seed glossary file for Codex to update before translation.
-- `workpacks/*.jsonl`: batch files produced by `make-workpacks`.
+- `index/manifest.json`: entry point for staged translation.
+- `index/unit_index.jsonl`, `index/source_index.jsonl`, `index/kind_index.jsonl`, `index/raw_repeats.jsonl`: compact searchable indexes.
+- `context/source-summaries/*.md`: per-source summaries for local context loading.
+- `workpacks/contextual/*.jsonl`: bounded context-preserving batches.
+- `translations/parts/*.jsonl`: editable staged translation parts.
+- `translations/translations.jsonl`: merged canonical translation file.
