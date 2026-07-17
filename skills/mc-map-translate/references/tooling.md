@@ -17,6 +17,7 @@ The plugin includes its own standard tools. Do not depend on MCC-i18n or copy it
 - `make-workpacks`: split units into stable JSONL translation batches.
 - `merge-translations`: merge translated JSONL files/directories back into one canonical translations JSONL by stable `id`.
 - `translation-status`: report coverage by unit, source kind, source file, and segment slots.
+- `write-progress-todo`: write or refresh `translation_progress.md`, the persistent workpack TODO list.
 - `prepare-segments`: add `segments[]` translation slots for grouped components with multiple hardcoded `text` nodes.
 - `export-table`: export selected units to UTF-8 TSV.
 - `import-table`: merge TSV translations back into JSONL by `id`.
@@ -40,14 +41,17 @@ python skills/mc-map-translate/scripts/mcmap_java_tools.py scan <world-or-zip> -
 python skills/mc-map-translate/scripts/mcmap_contract.py validate-units <workdir>/translation_units.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py summarize-units <workdir>/translation_units.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py translation-status <workdir>
+python skills/mc-map-translate/scripts/mcmap_contract.py write-progress-todo <workdir>
 ```
 
 Codex then translates staged batches:
 
 - read `index/manifest.json`;
+- read and maintain `translation_progress.md` as the persistent workpack TODO list;
 - load one `workpacks/contextual/workpack_###.jsonl`;
 - load only the `context_summaries` listed for that workpack;
 - write translations to the matching `translations/parts/workpack_###.jsonl`;
+- refresh `translation_progress.md` after each workpack;
 - update `glossary.md` when terminology decisions are made.
 
 After Codex fills one or more translation parts:
@@ -56,6 +60,7 @@ After Codex fills one or more translation parts:
 python skills/mc-map-translate/scripts/mcmap_contract.py merge-translations <workdir>/translations/parts --base <workdir>/translation_units.jsonl --out <workdir>/translations/translations.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py validate-units <workdir>/translations/translations.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py translation-status <workdir>/translation_units.jsonl --translations <workdir>/translations/translations.jsonl --incomplete-only
+python skills/mc-map-translate/scripts/mcmap_contract.py write-progress-todo <workdir>
 ```
 
 If a translation part changes after `translations/translations.jsonl` exists, run `merge-translations` again before exporting from the project root.
@@ -120,6 +125,7 @@ Use `--no-binary` when the map is huge, when a fast first pass is enough, or whe
 - `scan_report.json`: machine-readable counts, warnings, top files, repeated text, and binary coverage.
 - `scan_review.md`: human-readable triage summary.
 - `glossary.md`: seed glossary file for Codex to update before translation.
+- `translation_progress.md`: persistent workpack TODO list; keep it updated throughout translation.
 - `index/manifest.json`: entry point for staged translation.
 - `index/unit_index.jsonl`, `index/source_index.jsonl`, `index/kind_index.jsonl`, `index/raw_repeats.jsonl`: compact searchable indexes.
 - `context/source-summaries/*.md`: per-source summaries for local context loading.

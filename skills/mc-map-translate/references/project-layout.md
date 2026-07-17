@@ -19,6 +19,7 @@ The goal is not to load the whole map at once. The goal is to make the whole map
 - `workpacks/contextual/workpack_###.jsonl`: bounded AI translation batches, sorted by source path so nearby text stays nearby.
 - `translations/parts/workpack_###.jsonl`: editable translation parts matching workpacks.
 - `translations/translations.jsonl`: merged canonical translation output after `merge-translations`.
+- `translation_progress.md`: durable workpack TODO list and progress summary.
 - `translation_instructions.md`: short local instructions for staged work.
 
 `translation_units.jsonl` remains the canonical scan aggregate. The indexed layout is a working projection of it, not a replacement for stable unit IDs.
@@ -28,14 +29,36 @@ The goal is not to load the whole map at once. The goal is to make the whole map
 For each translation batch:
 
 1. Read `index/manifest.json`.
-2. Choose one workpack from `workpacks`.
-3. Read the workpack JSONL.
-4. Read only the `context_summaries` listed for that workpack.
-5. Read `glossary.md` and relevant rows from `index/raw_repeats.jsonl` if terminology repeats.
-6. If a unit still lacks context, read its `units/by-source/*.jsonl` group from `source_index.jsonl`.
-7. Write translations only to the matching `translations/parts/workpack_###.jsonl`.
+2. Read or create `translation_progress.md`.
+3. Choose one unchecked or in-progress workpack from the TODO.
+4. Read the workpack JSONL.
+5. Read only the `context_summaries` listed for that workpack.
+6. Read `glossary.md` and relevant rows from `index/raw_repeats.jsonl` if terminology repeats.
+7. If a unit still lacks context, read its `units/by-source/*.jsonl` group from `source_index.jsonl`.
+8. Write translations only to the matching `translations/parts/workpack_###.jsonl`.
+9. Refresh `translation_progress.md` after each batch.
 
 Do not load every file under `units/`, `workpacks/`, and `translations/parts/` at the same time.
+
+## Progress TODO
+
+Every real map translation must maintain `translation_progress.md`. This is the durable TODO list for the map, while the Codex task checklist may track the current session's active steps.
+
+Create or refresh it with:
+
+```bash
+python skills/mc-map-translate/scripts/mcmap_contract.py write-progress-todo work/map
+```
+
+Refresh the TODO:
+
+- after generating the project layout;
+- before starting a new workpack if the file is missing or stale;
+- after writing each `translations/parts/workpack_###.jsonl`;
+- after `merge-translations`;
+- before final export/QA.
+
+Do not mark a workpack complete until every unit has `translation` filled and every required `segments[].translation` slot is filled.
 
 ## Segment-Aware Translation
 

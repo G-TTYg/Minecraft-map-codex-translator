@@ -653,6 +653,147 @@ def write_source_summary(path: Path, source_file: str, rows: list[dict[str, Any]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def row_translation_complete(row: dict[str, Any]) -> bool:
+    if not str(row.get("translation", "")).strip():
+        return False
+    segments = segment_entries(row)
+    if segments and any(not str(segment.get("translation", "")).strip() for segment in segments):
+        return False
+    return True
+
+
+def pack_progress(rows: list[dict[str, Any]], expected_count: int | None = None) -> dict[str, int | str]:
+    total_units = expected_count if expected_count is not None else len(rows)
+    translated_units = sum(1 for row in rows if str(row.get("translation", "")).strip())
+    complete_units = sum(1 for row in rows if row_translation_complete(row))
+    total_segments = sum(len(segment_entries(row)) for row in rows)
+    translated_segments = sum(
+        1
+        for row in rows
+        for segment in segment_entries(row)
+        if str(segment.get("translation", "")).strip()
+    )
+    if total_units and complete_units >= total_units and translated_segments >= total_segments:
+        status = "complete"
+    elif translated_units or translated_segments:
+        status = "in-progress"
+    else:
+        status = "pending"
+    return {
+        "status": status,
+        "total_units": total_units,
+        "translated_units": translated_units,
+        "complete_units": complete_units,
+        "total_segments": total_segments,
+        "translated_segments": translated_segments,
+    }
+
+
+def load_project_manifest(project_root: Path) -> dict[str, Any]:
+    manifest_path = project_root / "index" / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"missing indexed project manifest: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError(f"manifest must be an object: {manifest_path}")
+    return manifest
+
+
+def format_progress_line(pack: dict[str, Any], stats: dict[str, int | str]) -> str:
+    checked = "x" if stats["status"] == "complete" else " "
+    file_name = Path(str(pack.get("file", ""))).name
+    part_name = str(pack.get("translation_part", ""))
+    source_count = len(pack.get("source_files", [])) if isinstance(pack.get("source_files"), list) else 0
+    kind_text = ", ".join(str(kind) for kind in pack.get("source_kinds", []) if kind) or "unknown"
+    return (
+        f"- [{checked}] `{file_name}` {stats['status']} - "
+        f"units {stats['complete_units']}/{stats['total_units']} complete "
+        f"({stats['translated_units']} translated), "
+        f"segments {stats['translated_segments']}/{stats['total_segments']}; "
+        f"part `{part_name}`; sources {source_count}; kinds {kind_text}"
+    )
+
+
+def write_progress_todo_file(project_root: Path, out: Path | None = None) -> dict[str, Any]:
+    project_root = project_root.resolve()
+    manifest = load_project_manifest(project_root)
+    workpacks = [pack for pack in manifest.get("workpacks", []) if isinstance(pack, dict)]
+    out_path = out.resolve() if out else project_root / "translation_progress.md"
+
+    pack_reports: list[dict[str, Any]] = []
+    overall = Counter()
+    lines = [
+        "# Translation Progress",
+        "",
+        "Maintain this TODO whenever translating the map. Update it before starting a workpack, after writing a translation part, and after merging/export QA.",
+        "",
+        f"- Project root: `{project_root}`",
+        f"- Updated: {utc_now()}",
+        f"- Workpacks: {len(workpacks)}",
+        "",
+        "## Workpack TODO",
+        "",
+    ]
+
+    for pack in workpacks:
+        part = str(pack.get("translation_part", ""))
+        part_path = project_root / part if part else Path()
+        if part and part_path.exists():
+            rows = read_jsonl_file(part_path.resolve())
+        else:
+            fallback = str(pack.get("file", ""))
+            fallback_path = project_root / fallback if fallback else Path()
+            rows = read_jsonl_file(fallback_path.resolve()) if fallback and fallback_path.exists() else []
+        expected_count = int(pack.get("unit_count", len(rows)) or len(rows))
+        stats = pack_progress(rows, expected_count)
+        pack_reports.append({"file": pack.get("file", ""), "translation_part": part, **stats})
+        overall["total_units"] += int(stats["total_units"])
+        overall["translated_units"] += int(stats["translated_units"])
+        overall["complete_units"] += int(stats["complete_units"])
+        overall["total_segments"] += int(stats["total_segments"])
+        overall["translated_segments"] += int(stats["translated_segments"])
+        lines.append(format_progress_line(pack, stats))
+
+    complete_packs = sum(1 for item in pack_reports if item["status"] == "complete")
+    in_progress_packs = sum(1 for item in pack_reports if item["status"] == "in-progress")
+    pending_packs = sum(1 for item in pack_reports if item["status"] == "pending")
+    lines.extend(
+        [
+            "",
+            "## Totals",
+            "",
+            f"- Complete workpacks: {complete_packs}/{len(workpacks)}",
+            f"- In-progress workpacks: {in_progress_packs}",
+            f"- Pending workpacks: {pending_packs}",
+            f"- Complete units: {overall['complete_units']}/{overall['total_units']}",
+            f"- Translated units: {overall['translated_units']}/{overall['total_units']}",
+            f"- Translated segments: {overall['translated_segments']}/{overall['total_segments']}",
+            "",
+            "## Maintenance Rules",
+            "",
+            "- Mark the active workpack in the conversation TODO before editing it.",
+            "- Keep this file synchronized with `translations/parts/*.jsonl`; rerun `write-progress-todo` after each batch.",
+            "- Do not mark a workpack complete until full-unit translations and all required segment translations are filled.",
+            "- Run `merge-translations`, `validate-units`, and `translation-status` before final export.",
+            "",
+        ]
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {
+        "path": str(out_path),
+        "workpacks": len(workpacks),
+        "complete_workpacks": complete_packs,
+        "in_progress_workpacks": in_progress_packs,
+        "pending_workpacks": pending_packs,
+        "total_units": overall["total_units"],
+        "complete_units": overall["complete_units"],
+        "translated_units": overall["translated_units"],
+        "total_segments": overall["total_segments"],
+        "translated_segments": overall["translated_segments"],
+    }
+
+
 def make_project_files(args: argparse.Namespace) -> int:
     rows = selected_rows(read_jsonl(Path(args.units).resolve()), args)
     out_dir = Path(args.out_dir).resolve()
@@ -774,11 +915,13 @@ def make_project_files(args: argparse.Namespace) -> int:
         "This folder is intentionally indexed. Do not load every file into model context.",
         "",
         "1. Read `index/manifest.json` and `glossary.md` first.",
-        "2. Pick one `workpacks/contextual/workpack_###.jsonl` entry from the manifest.",
-        "3. Read only the listed `context/source-summaries/*.md` files and any nearby source/kind index rows needed for that pack.",
-        "4. Fill `translation` in the matching `translations/parts/workpack_###.jsonl` file.",
-        "5. For `segments[]`, translate the full unit first, then fill each segment so the styled Minecraft component still reads naturally.",
-        "6. Run `merge-translations` after enough parts are translated, then validate and export from the merged file or the project root.",
+        "2. Read and maintain `translation_progress.md` as the persistent workpack TODO list.",
+        "3. Pick one unchecked or in-progress `workpacks/contextual/workpack_###.jsonl` entry from the TODO/manifest.",
+        "4. Read only the listed `context/source-summaries/*.md` files and any nearby source/kind index rows needed for that pack.",
+        "5. Fill `translation` in the matching `translations/parts/workpack_###.jsonl` file.",
+        "6. For `segments[]`, translate the full unit first, then fill each segment so the styled Minecraft component still reads naturally.",
+        "7. Refresh `translation_progress.md` after each translated batch.",
+        "8. Run `merge-translations` after enough parts are translated, then validate and export from the merged file or the project root.",
         "",
     ]
     (out_dir / "translation_instructions.md").write_text("\n".join(instructions), encoding="utf-8")
@@ -811,12 +954,14 @@ def make_project_files(args: argparse.Namespace) -> int:
         "workpacks": workpacks,
     }
     write_json(index_dir / "manifest.json", manifest)
+    todo = write_progress_todo_file(out_dir)
 
     print(f"project_files: {out_dir}")
     print(f"units: {len(rows)}")
     print(f"sources: {len(rows_by_source)}")
     print(f"workpacks: {len(workpacks)}")
     print(f"translation_parts: {translation_parts_dir}")
+    print(f"progress_todo: {todo['path']}")
     return 0
 
 
@@ -1251,6 +1396,18 @@ def translation_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def write_progress_todo(args: argparse.Namespace) -> int:
+    project_root = Path(args.project).resolve()
+    out = Path(args.out).resolve() if args.out else None
+    report = write_progress_todo_file(project_root, out)
+    print(f"progress_todo: {report['path']}")
+    print(f"workpacks: {report['workpacks']}")
+    print(f"complete_workpacks: {report['complete_workpacks']}")
+    print(f"complete_units: {report['complete_units']}/{report['total_units']}")
+    print(f"translated_segments: {report['translated_segments']}/{report['total_segments']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MC map localization contract helpers")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1372,6 +1529,11 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--top-sources", type=int, default=20, help="number of source files to include")
     status.add_argument("--out", default="", help="optional JSON report output")
     status.set_defaults(func=translation_status)
+
+    todo = subparsers.add_parser("write-progress-todo", help="write or refresh the persistent translation progress TODO file")
+    todo.add_argument("project", help="indexed project work directory containing index/manifest.json")
+    todo.add_argument("--out", default="", help="optional output path; defaults to <project>/translation_progress.md")
+    todo.set_defaults(func=write_progress_todo)
 
     return parser
 

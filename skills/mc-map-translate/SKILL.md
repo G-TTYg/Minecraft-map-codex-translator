@@ -52,6 +52,7 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - Do not load the whole map into model context. Use `index/manifest.json`, `index/unit_index.jsonl`, `index/source_index.jsonl`, source summaries, and one workpack at a time.
    - Cluster text by source file, coordinates, command-chain order, function call chain, book page order, dialogue speaker, quest, and repeated terminology.
    - Create or update `glossary.md` before translating substantial text.
+   - Maintain translation progress as a TODO list. Use the Codex task checklist for the active session when available, and keep the durable project TODO at `translation_progress.md` updated with `write-progress-todo`.
    - Translate in batches small enough to keep local context visible. Write staged translations to `translations/parts/workpack_###.jsonl`, then merge by stable `id`.
 
 4. Translate like a localization editor.
@@ -82,6 +83,7 @@ python skills/mc-map-translate/scripts/mcmap_contract.py init-workspace path/to/
 python skills/mc-map-translate/scripts/mcmap_contract.py validate-units work/mymap/translation_units.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py make-project-files work/mymap/translation_units.jsonl --out-dir work/mymap --max-units 120
 python skills/mc-map-translate/scripts/mcmap_contract.py translation-status work/mymap
+python skills/mc-map-translate/scripts/mcmap_contract.py write-progress-todo work/mymap
 python skills/mc-map-translate/scripts/mcmap_contract.py make-workpacks work/mymap/translation_units.jsonl --out-dir work/mymap/workpacks --max-units 200
 python skills/mc-map-translate/scripts/mcmap_contract.py prepare-segments work/mymap/translation_units.jsonl --out work/mymap/translations.segmented.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py export-table work/mymap/translation_units.jsonl --out work/mymap/translations.tsv
@@ -107,9 +109,9 @@ python skills/mc-map-translate/scripts/mcmap_java_tools.py zip-resource-pack wor
 python skills/mc-map-translate/scripts/mcmap_java_tools.py embed-resource-pack path/to/world --resource-pack work/mymap/exports/resource-pack --out work/mymap/exports/world-with-resources
 ```
 
-Use scanner output files directly: `translation_units.jsonl`, `scan_report.json`, `scan_review.md`, `glossary.md`, and the indexed project layout under `index/`, `context/`, `workpacks/contextual/`, and `translations/parts/`. If a parser is not yet available for a source kind, report missing parser coverage instead of pretending low-confidence extraction is reliable.
+Use scanner output files directly: `translation_units.jsonl`, `scan_report.json`, `scan_review.md`, `glossary.md`, `translation_progress.md`, and the indexed project layout under `index/`, `context/`, `workpacks/contextual/`, and `translations/parts/`. If a parser is not yet available for a source kind, report missing parser coverage instead of pretending low-confidence extraction is reliable.
 
-For staged AI translation, treat `index/manifest.json` as the entry point. Load one workpack and its listed source summaries at a time, update the matching translation part, and use `merge-translations` before final validation/export. Export and apply commands can accept a merged JSONL file, a translation-parts directory, or the project root.
+For staged AI translation, treat `index/manifest.json` as the entry point. Load one workpack and its listed source summaries at a time, update the matching translation part, refresh `translation_progress.md`, and use `merge-translations` before final validation/export. Export and apply commands can accept a merged JSONL file, a translation-parts directory, or the project root.
 
 `apply-hybrid-keys` is intentionally conservative. It copies/extracts the world, patches the copy, and writes `mcmap_hybrid_apply_report.json`. For single-node text components it injects the unit `translation_key`. For multi-node grouped components it uses `segments[]` and the default `--multi-text-mode split-nodes` to replace each hardcoded `text` node with its segment `translation_key`, preserving sibling selectors, scores, colors, events, keybinds, and `extra`.
 
@@ -120,6 +122,7 @@ For staged AI translation, treat `index/manifest.json` as the entry point. Load 
 - Do not translate command keywords, selectors, scoreboard objectives, storage paths, entity IDs, item IDs, block IDs, NBT keys, or JSON text component field names.
 - Do not remove formatting, click events, hover events, insertion text, fonts, or keybind references.
 - Do not claim resource-pack-only coverage for hardcoded text unless the map already uses translation keys or the output mode includes key injection.
+- Do not translate a real map without maintaining `translation_progress.md` or an equivalent user-approved persistent progress TODO.
 - Ask for explicit confirmation before `embedded-direct` output.
 
 ## Current Scope
