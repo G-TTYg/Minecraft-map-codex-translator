@@ -6,6 +6,8 @@ Use this reference before running bundled scripts.
 
 The plugin includes its own standard tools. Do not depend on MCC-i18n or copy its code into this plugin. The useful standardized pattern is: inspect, scan, create an indexed project, translate one contextual workpack at a time, merge staged translations, validate, export a resource pack, and optionally embed that resource pack into a copied Java world.
 
+The bundled tools do not call external translation services and do not translate text by themselves. They create reliable local inputs and outputs so Codex can perform context-aware expert localization, then validate and package the result.
+
 ## Tools
 
 `scripts/mcmap_contract.py`:
@@ -62,6 +64,7 @@ Codex then translates staged batches:
 - read and maintain `translation_progress.md` as the persistent workpack TODO list;
 - load one `workpacks/contextual/workpack_###.jsonl`;
 - load only the `context_summaries` listed for that workpack;
+- translate with Codex using the local context and glossary, not external machine-translation APIs;
 - write translations to the matching `translations/parts/workpack_###.jsonl`;
 - refresh `translation_progress.md` after each workpack;
 - update `glossary.md` when terminology decisions are made.

@@ -2,6 +2,13 @@
 
 Use this reference before translating player-facing text.
 
+## Translation Engine Boundary
+
+- Use Codex as the translator. Do not call external machine-translation APIs, browser translators, or third-party localization services by default.
+- Translate from the local map context: workpack rows, source summaries, nearby command/function order, glossary, repeated strings, notes, and QA findings.
+- Do not treat a literal draft as finished. Revise for player comprehension, tone, UI length, consistency, and Minecraft semantics before writing `translation`.
+- If the user explicitly requests an external translation service, keep it as a draft source only; Codex must still review, adapt, and QA every accepted translation against the map context.
+
 ## Voice
 
 - Use the target language and Java locale requested by the user. Do not default to Chinese.
@@ -9,6 +16,7 @@ Use this reference before translating player-facing text.
 - Prefer natural, concise, game-native phrasing in the target language.
 - Preserve the intended player emotion: urgency, mystery, comedy, horror, tutorial clarity, or epic narration.
 - Avoid stiff machine-translation phrasing.
+- Prefer a polished localization that a native player would accept over word-for-word source structure.
 
 ## Consistency
 
@@ -21,6 +29,13 @@ Maintain a glossary for:
 - Puzzle vocabulary and recurring hints.
 
 If a term appears in lore and gameplay instructions, choose one translation that works in both contexts unless there is a deliberate in-world distinction.
+
+## Completeness Standard
+
+- Translate every player-facing unit in the current workpack that can be safely translated with available context.
+- Do not skip difficult jokes, lore, signs, bossbars, books, or puzzle text merely because they require adaptation. Translate them carefully, or flag a concrete blocker and proposed rewrite.
+- Preserve deliberate untranslated names, IDs, brand-like terms, or stylistic source-language fragments only when they are intentional, and note that choice when it could be mistaken for missed coverage.
+- For low-confidence or risky units, prefer a cautious contextual translation plus a QA note over silent omission, unless applying it could break commands or puzzle mechanics.
 
 ## Minecraft-Specific Rules
 

@@ -18,6 +18,7 @@ Use this reference before apply or export.
 
 ## Translation QA
 
+- Translations were produced or reviewed by Codex against map context, not accepted blindly from an external machine-translation service.
 - Protected tokens are unchanged.
 - Selectors, placeholders, color codes, click/hover events, keybinds, and newlines are preserved or intentionally changed with notes.
 - No accidental translation of internal IDs or command syntax.
@@ -27,6 +28,7 @@ Use this reference before apply or export.
 - Grouped text components are translated as complete messages, not as isolated style fragments.
 - For `segments[]`, the full unit `translation` and each segment translation should agree semantically; segment translations should not read like unedited word-by-word fragments.
 - Target-language scripts, accents, punctuation width, right-to-left text, emoji, and Minecraft section sign formatting survive scan, edit, merge, export, and apply without corruption.
+- Stiff literal phrasing, context-inconsistent terminology, untranslated player-facing residues, and unexplained skipped difficult text are treated as QA failures.
 
 ## Coverage QA
 
@@ -39,6 +41,7 @@ Report counts by:
 - Units requiring `hybrid-key-injection`.
 - Units requiring `embedded-direct`.
 - Low-confidence anchors needing manual review.
+- Player-facing units intentionally left untranslated, with concrete reasons.
 - Files reported as pending binary parser coverage.
 - Top repeated raw strings and top source files from `scan_review.md`.
 - Any encoding or font-rendering risks found during table round-trip, resource-pack export, copied-world apply, or in-game review.

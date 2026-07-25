@@ -4,6 +4,8 @@ Use this reference when a map is too large to fit into one model context, which 
 
 The goal is not to load the whole map at once. The goal is to make the whole map scanable, searchable, and addressable, then load only the context needed for the current translation batch.
 
+This layout supports Codex expert translation, not external batch machine translation. The workpacks are sized so Codex can read enough local map context, reason about gameplay and tone, write polished translations, and then merge/QA the result.
+
 ## Standard Layout
 
 `make-project-files` creates these files under the work directory:
@@ -39,6 +41,7 @@ For each translation batch:
 9. Refresh `translation_progress.md` after each batch.
 
 Do not load every file under `units/`, `workpacks/`, and `translations/parts/` at the same time.
+Do not send the workpack to an external translation service by default; translate it with Codex using the loaded context.
 
 ## Progress TODO
 

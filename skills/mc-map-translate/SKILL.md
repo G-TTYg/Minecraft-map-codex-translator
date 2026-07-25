@@ -9,6 +9,8 @@ description: Professional Minecraft Java Edition map localization workflow for C
 
 Localize Minecraft Java Edition maps as a professional translator-engineer: preserve gameplay semantics, infer story context before translating, keep terminology consistent, and export a resource pack first whenever possible.
 
+This skill is not a wrapper around machine-translation services. The translator is Codex itself, using the scanned project index, source summaries, surrounding map context, glossary, progress TODO, and QA feedback to produce careful human-quality localization. Do not send map text to external translation APIs or browser-based translators unless the user explicitly asks for that exception.
+
 The target language is not fixed. Always use the locale or language requested by the user, such as `zh_cn`, `ja_jp`, `ko_kr`, `fr_fr`, or `es_es`. If the user gives a language name instead of a locale code, choose a standard Java locale code and record the assumption.
 
 Treat every translation artifact as Unicode data. Read and write JSON, JSONL, TSV, and language files as UTF-8; do not trust terminal display for non-ASCII text, especially on Windows. If text looks like mojibake, replacement characters, or question marks, verify the file bytes or JSON values before applying/exporting.
@@ -58,9 +60,11 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - Translate in batches small enough to keep local context visible. Write staged translations to `translations/parts/workpack_###.jsonl` as UTF-8, then merge by stable `id`.
 
 4. Translate like a localization editor.
+   - Translate with Codex reasoning over map context; do not call external translation APIs or paste batches into web translators.
    - Prefer natural player-facing target-language phrasing over literal source-language phrasing.
    - Keep gameplay instructions unambiguous.
    - Keep role names, place names, item names, puzzle terms, factions, and UI verbs consistent.
+   - Strive for the most complete safe localization possible: translate every player-facing unit that can be safely handled by the selected export modes, and record any remaining uncovered or risky text explicitly.
    - Preserve all protected tokens exactly unless a reference says they are safe to translate.
    - For puzzles, riddles, rhymes, lore, and jokes, preserve player experience over word-for-word meaning.
    - For units with `segments[]`, translate `raw` as the complete message first, then fill each `segments[].translation` so the preserved Minecraft component order still reads naturally.
@@ -124,6 +128,7 @@ For staged AI translation, treat `index/manifest.json` as the entry point. Load 
 
 - Do not edit the original map in place.
 - Do not globally replace raw strings in binary world data.
+- Do not call external translation APIs, browser translators, or third-party localization services by default. Use Codex plus local project context unless the user explicitly asks otherwise.
 - Do not translate command keywords, selectors, scoreboard objectives, storage paths, entity IDs, item IDs, block IDs, NBT keys, or JSON text component field names.
 - Do not remove formatting, click events, hover events, insertion text, fonts, or keybind references.
 - Do not claim resource-pack-only coverage for hardcoded text unless the map already uses translation keys or the output mode includes key injection.
