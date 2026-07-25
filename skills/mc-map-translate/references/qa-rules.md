@@ -12,6 +12,7 @@ Use this reference before apply or export.
 - Confirm all generated JSON, JSONL, TSV, and language files are valid UTF-8 and contain no replacement characters or mojibake from terminal/table round-trips.
 - For patched worlds, validate each changed NBT/SNBT/JSON file with the appropriate parser.
 - Ensure exported zip roots are correct: `pack.mcmeta` must be at the resource-pack root.
+- For copied worlds with embedded packs, ensure `resources.zip` is in the same directory as the copied world's `level.dat`; for map zips with a top-level containing folder, the correct path is usually `<folder>/resources.zip`, not archive-root `resources.zip`.
 - After `apply-hybrid-keys`, inspect `mcmap_hybrid_apply_report.json` and rescan the copied world or copied zip when practical.
 - After `apply-direct-nbt-strings`, inspect `mcmap_direct_nbt_apply_report.json` and rescan the copied world or copied zip when practical.
 

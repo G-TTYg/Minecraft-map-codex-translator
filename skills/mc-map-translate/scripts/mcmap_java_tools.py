@@ -2176,6 +2176,20 @@ def zip_any_dir(src: Path, out: Path) -> None:
             archive.write(path, path.relative_to(src).as_posix())
 
 
+def find_world_root_for_resources(root: Path) -> Path:
+    """Return the Java world root inside a copied package tree."""
+    if (root / "level.dat").is_file():
+        return root
+
+    level_files = sorted(p for p in root.rglob("level.dat") if p.is_file())
+    if len(level_files) == 1:
+        return level_files[0].parent
+    if not level_files:
+        raise ValueError(f"cannot embed resources.zip because no level.dat was found under copied world: {root}")
+    sample = ", ".join(path.relative_to(root).as_posix() for path in level_files[:5])
+    raise ValueError(f"cannot choose resources.zip location because multiple level.dat files were found: {sample}")
+
+
 def default_apply_report_path(out: Path, is_zip_output: bool) -> Path:
     if is_zip_output:
         return out.with_suffix(out.suffix + ".mcmap_hybrid_apply_report.json")
@@ -2282,13 +2296,19 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
     else:
         report_path = default_apply_report_path(out, is_zip_output)
 
+    resource_pack_embed_path = ""
+
     def run_on_copy(workdir: Path) -> None:
+        nonlocal resource_pack_embed_path
         copy_source_to_workdir(source, workdir)
         patch_world_copy(workdir, rows, state)
         if args.resource_pack:
             pack = Path(args.resource_pack).resolve()
             if not state.dry_run:
-                zip_dir(pack, workdir / "resources.zip")
+                resource_root = find_world_root_for_resources(workdir)
+                target = resource_root / "resources.zip"
+                zip_dir(pack, target)
+                resource_pack_embed_path = target.relative_to(workdir).as_posix()
 
     if args.dry_run:
         with tempfile.TemporaryDirectory(prefix="mcmap-apply-") as tmp:
@@ -2323,6 +2343,7 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
         "skipped": dict(sorted(state.skipped.items())),
         "skipped_samples": state.skipped_samples,
         "resource_pack_embedded": bool(args.resource_pack and not args.dry_run),
+        "resource_pack_embed_path": resource_pack_embed_path,
     }
     write_json(report_path, report)
 
@@ -2458,9 +2479,10 @@ def embed_resource_pack(args: argparse.Namespace) -> int:
         shutil.rmtree(out)
 
     shutil.copytree(world, out)
-    zip_dir(pack, out / "resources.zip")
+    resource_root = find_world_root_for_resources(out)
+    zip_dir(pack, resource_root / "resources.zip")
     print(f"copied_world: {out}")
-    print(f"embedded_resource_pack: {out / 'resources.zip'}")
+    print(f"embedded_resource_pack: {resource_root / 'resources.zip'}")
     return 0
 
 

@@ -29,7 +29,7 @@ The plugin includes its own standard tools. Do not depend on MCC-i18n or copy it
 
 - `inspect`: detect Java map/package markers and Bedrock-only markers.
 - `scan`: scan Java resource-pack language JSON, datapack JSON text components, `.mcfunction` JSON text components, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Pass `--project-layout` to also create the indexed multi-file layout. NBT strings are decoded as strict UTF-8; invalid bytes are reported instead of converted to replacement characters.
-- `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy. Blocks selected rows that contain Unicode replacement characters.
+- `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy. Blocks selected rows that contain Unicode replacement characters. When `--resource-pack` is used, embeds `resources.zip` beside the copied world's `level.dat`, including packages whose zip root is a containing folder.
 - `apply-direct-nbt-strings`: copy/extract a Java world or map zip and directly replace translated plain NBT strings in `.dat` and `.mca` files when exact anchors match. Blocks selected rows that contain Unicode replacement characters.
 - `zip-resource-pack`: zip a resource pack directory with the correct root.
 - `embed-resource-pack`: copy a Java world and add `resources.zip` to the copy.
@@ -108,6 +108,8 @@ To ship a copied world with the pack embedded:
 ```bash
 python skills/mc-map-translate/scripts/mcmap_java_tools.py embed-resource-pack <world> --resource-pack <workdir>/exports/resource-pack --out <workdir>/exports/world-with-resources
 ```
+
+For copied map zips with a top-level containing folder, `resources.zip` must be placed in the actual Java world root, the same directory as `level.dat`, not necessarily the archive root. The apply report records `resource_pack_embed_path` for `apply-hybrid-keys --resource-pack`.
 
 ## Apply-Hybrid-Keys Behavior
 
