@@ -30,6 +30,14 @@ If a term appears in lore and gameplay instructions, choose one translation that
 - Preserve newline shape unless a UI-length issue requires a controlled change.
 - Preserve JSON text component styling and events.
 
+## Multilingual Encoding
+
+- Treat all translation text as Unicode and all project artifacts as UTF-8 unless a source format explicitly says otherwise.
+- Do not judge non-ASCII text only from PowerShell, cmd, or shell output. If display looks corrupt, inspect the JSON/JSONL/TSV file with an explicit UTF-8 reader or compare escaped code points.
+- Do not paste terminal-mojibake back into translation files. Re-open the original UTF-8 artifact and repair the affected rows before validation or export.
+- Preserve intentional full-width punctuation, combining marks, accents, kana/han/hangul, right-to-left text, emoji, and Minecraft section sign formatting. Do not normalize Unicode unless the target language or a QA finding requires it.
+- Watch custom font providers and bitmap fonts in resource packs. A string can be valid UTF-8 but still render as missing glyphs in-game; report that as a font/rendering QA issue, not as a translation success.
+
 ## Multi-Text Components
 
 Some JSON text components split one visible message across several `text` nodes so each part can have a different color, event, selector, or score insertion. For rows with `segments[]`:
@@ -54,3 +62,4 @@ Before finalizing a batch, ask internally:
 - Are names and terms consistent with the glossary?
 - Did any protected token change?
 - Did the translation become too long for the expected display surface?
+- Did every target-language character survive UTF-8 read/write and table import/export without mojibake?

@@ -11,6 +11,8 @@ Localize Minecraft Java Edition maps as a professional translator-engineer: pres
 
 The target language is not fixed. Always use the locale or language requested by the user, such as `zh_cn`, `ja_jp`, `ko_kr`, `fr_fr`, or `es_es`. If the user gives a language name instead of a locale code, choose a standard Java locale code and record the assumption.
 
+Treat every translation artifact as Unicode data. Read and write JSON, JSONL, TSV, and language files as UTF-8; do not trust terminal display for non-ASCII text, especially on Windows. If text looks like mojibake, replacement characters, or question marks, verify the file bytes or JSON values before applying/exporting.
+
 The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injection` only when hardcoded text must be converted to translation keys in a copied world. Use `embedded-direct` only when the user explicitly rejects a resource pack and accepts the higher risk of editing world data directly.
 
 ## Decision Tree
@@ -53,7 +55,7 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - Cluster text by source file, coordinates, command-chain order, function call chain, book page order, dialogue speaker, quest, and repeated terminology.
    - Create or update `glossary.md` before translating substantial text.
    - Maintain translation progress as a TODO list. Use the Codex task checklist for the active session when available, and keep the durable project TODO at `translation_progress.md` updated with `write-progress-todo`.
-   - Translate in batches small enough to keep local context visible. Write staged translations to `translations/parts/workpack_###.jsonl`, then merge by stable `id`.
+   - Translate in batches small enough to keep local context visible. Write staged translations to `translations/parts/workpack_###.jsonl` as UTF-8, then merge by stable `id`.
 
 4. Translate like a localization editor.
    - Prefer natural player-facing target-language phrasing over literal source-language phrasing.
@@ -71,7 +73,7 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
 6. QA before final delivery.
    - Run schema validation on JSONL units and translation files.
    - Validate JSON text components and language JSON.
-   - Check placeholders, selectors, color codes, newline counts, key coverage, untranslated residues, duplicate key conflicts, and command breakage risk.
+   - Check placeholders, selectors, color codes, newline counts, key coverage, untranslated residues, duplicate key conflicts, multilingual encoding integrity, and command breakage risk.
    - Produce a short report with coverage by source kind and export mode.
 
 ## Script Helpers
@@ -126,6 +128,7 @@ For staged AI translation, treat `index/manifest.json` as the entry point. Load 
 - Do not remove formatting, click events, hover events, insertion text, fonts, or keybind references.
 - Do not claim resource-pack-only coverage for hardcoded text unless the map already uses translation keys or the output mode includes key injection.
 - Do not translate a real map without maintaining `translation_progress.md` or an equivalent user-approved persistent progress TODO.
+- Do not apply or export translations that show mojibake, replacement characters, or `?` in place of target-language characters; re-read and repair the UTF-8 source artifact first.
 - Ask for explicit confirmation before `embedded-direct` output.
 
 ## Current Scope

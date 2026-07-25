@@ -11,7 +11,7 @@ The plugin includes its own standard tools. Do not depend on MCC-i18n or copy it
 `scripts/mcmap_contract.py`:
 
 - `init-workspace`: create the standard project folder and `project.json`.
-- `validate-units`: validate `translation_units.jsonl` or `translations.jsonl`.
+- `validate-units`: validate `translation_units.jsonl` or `translations.jsonl`, including protected-token and UTF-8 replacement-character checks.
 - `summarize-units`: summarize translation coverage.
 - `make-project-files`: create the indexed multi-file project layout for staged AI translation.
 - `make-workpacks`: split units into stable JSONL translation batches.
@@ -28,9 +28,9 @@ The plugin includes its own standard tools. Do not depend on MCC-i18n or copy it
 `scripts/mcmap_java_tools.py`:
 
 - `inspect`: detect Java map/package markers and Bedrock-only markers.
-- `scan`: scan Java resource-pack language JSON, datapack JSON text components, `.mcfunction` JSON text components, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Pass `--project-layout` to also create the indexed multi-file layout.
-- `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy.
-- `apply-direct-nbt-strings`: copy/extract a Java world or map zip and directly replace translated plain NBT strings in `.dat` and `.mca` files when exact anchors match.
+- `scan`: scan Java resource-pack language JSON, datapack JSON text components, `.mcfunction` JSON text components, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Pass `--project-layout` to also create the indexed multi-file layout. NBT strings are decoded as strict UTF-8; invalid bytes are reported instead of converted to replacement characters.
+- `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy. Blocks selected rows that contain Unicode replacement characters.
+- `apply-direct-nbt-strings`: copy/extract a Java world or map zip and directly replace translated plain NBT strings in `.dat` and `.mca` files when exact anchors match. Blocks selected rows that contain Unicode replacement characters.
 - `zip-resource-pack`: zip a resource pack directory with the correct root.
 - `embed-resource-pack`: copy a Java world and add `resources.zip` to the copy.
 
@@ -44,6 +44,17 @@ python skills/mc-map-translate/scripts/mcmap_contract.py summarize-units <workdi
 python skills/mc-map-translate/scripts/mcmap_contract.py translation-status <workdir>
 python skills/mc-map-translate/scripts/mcmap_contract.py write-progress-todo <workdir>
 ```
+
+## Encoding Discipline
+
+The bundled scripts read and write JSON, JSONL, TSV, language JSON, and reports with UTF-8. Keep that invariant when editing or generating files outside the scripts.
+
+- Prefer the bundled import/export commands for TSV and JSONL instead of ad hoc shell redirection.
+- When scripting translation edits, open files with `encoding="utf-8"` or `encoding="utf-8-sig"` for uncertain input and write UTF-8 output.
+- On Windows, terminal output may misrender valid Unicode. Treat mojibake in the console as a display warning, not proof that the file is corrupt; verify with an explicit UTF-8 reader before changing data.
+- Do not use a lossy console, clipboard, spreadsheet save, or shell pipeline as the only copy of translated non-ASCII text.
+- Treat `U+FFFD` as a blocking data-loss signal. `validate-units`, table export/import, translation merge, resource-pack export, and copied-world apply commands reject rows containing it.
+- After table round-trips, rerun `validate-units` and spot-check representative rows for target-language characters, accents, right-to-left text, emoji, section signs, and placeholders.
 
 Codex then translates staged batches:
 

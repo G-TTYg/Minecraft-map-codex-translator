@@ -9,6 +9,7 @@ Use this reference before apply or export.
 - Validate `pack.mcmeta`.
 - Validate target locale filenames use Java locale format such as `ja_jp`, `fr_fr`, or `zh_cn`.
 - Validate TSV imports by running `validate-units` on the merged `translations.jsonl`.
+- Confirm all generated JSON, JSONL, TSV, and language files are valid UTF-8 and contain no replacement characters or mojibake from terminal/table round-trips.
 - For patched worlds, validate each changed NBT/SNBT/JSON file with the appropriate parser.
 - Ensure exported zip roots are correct: `pack.mcmeta` must be at the resource-pack root.
 - After `apply-hybrid-keys`, inspect `mcmap_hybrid_apply_report.json` and rescan the copied world or copied zip when practical.
@@ -24,6 +25,7 @@ Use this reference before apply or export.
 - Duplicate language keys have identical intended meaning or are split.
 - Grouped text components are translated as complete messages, not as isolated style fragments.
 - For `segments[]`, the full unit `translation` and each segment translation should agree semantically; segment translations should not read like unedited word-by-word fragments.
+- Target-language scripts, accents, punctuation width, right-to-left text, emoji, and Minecraft section sign formatting survive scan, edit, merge, export, and apply without corruption.
 
 ## Coverage QA
 
@@ -38,6 +40,7 @@ Report counts by:
 - Low-confidence anchors needing manual review.
 - Files reported as pending binary parser coverage.
 - Top repeated raw strings and top source files from `scan_review.md`.
+- Any encoding or font-rendering risks found during table round-trip, resource-pack export, copied-world apply, or in-game review.
 
 ## Risk Report
 

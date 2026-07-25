@@ -144,6 +144,34 @@ def require_locale(value: str, field: str) -> None:
         raise ValueError(f"{field} must be a Java locale code like zh_cn, ja_jp, fr_fr, or es_es: {value}")
 
 
+def replacement_character_errors(value: Any, field: str, line: Any) -> list[str]:
+    if isinstance(value, str) and "\ufffd" in value:
+        return [f"line {line}: {field} contains Unicode replacement character U+FFFD; check UTF-8 decoding before export"]
+    return []
+
+
+def unit_encoding_errors(unit: dict[str, Any]) -> list[str]:
+    line = unit.get("_line_no", "?")
+    errors: list[str] = []
+    errors.extend(replacement_character_errors(unit.get("raw", ""), "raw", line))
+    errors.extend(replacement_character_errors(unit.get("translation", ""), "translation", line))
+    errors.extend(replacement_character_errors(unit.get("notes", ""), "notes", line))
+    segments = unit.get("segments")
+    if isinstance(segments, list):
+        for offset, segment in enumerate(segments):
+            if not isinstance(segment, dict):
+                continue
+            errors.extend(replacement_character_errors(segment.get("raw", ""), f"segments[{offset}].raw", line))
+            errors.extend(replacement_character_errors(segment.get("translation", ""), f"segments[{offset}].translation", line))
+    return errors
+
+
+def print_blocking_errors(errors: list[str], summary: str) -> None:
+    for error in errors:
+        print(error, file=sys.stderr)
+    print(summary, file=sys.stderr)
+
+
 def validate_unit(unit: dict[str, Any]) -> list[str]:
     line = unit.get("_line_no", "?")
     errors: list[str] = []
@@ -155,6 +183,7 @@ def validate_unit(unit: dict[str, Any]) -> list[str]:
         errors.append(f"line {line}: id is empty")
     if "raw" in unit and not str(unit["raw"]).strip():
         errors.append(f"line {line}: raw is empty")
+    errors.extend(unit_encoding_errors(unit))
     if "address" in unit and not isinstance(unit["address"], dict):
         errors.append(f"line {line}: address must be an object")
 
@@ -214,9 +243,7 @@ def validate_units(path: Path) -> int:
         errors.extend(validate_unit(row))
 
     if errors:
-        for error in errors:
-            print(error, file=sys.stderr)
-        print(f"invalid: {len(errors)} error(s), {len(rows)} unit(s)", file=sys.stderr)
+        print_blocking_errors(errors, f"invalid: {len(errors)} error(s), {len(rows)} unit(s)")
         return 1
 
     print(f"valid: {len(rows)} unit(s)")
@@ -413,6 +440,8 @@ def make_resource_pack(args: argparse.Namespace) -> int:
     rows = read_jsonl(translations)
 
     errors: list[str] = []
+    for row in rows:
+        errors.extend(unit_encoding_errors(row))
     lang_by_namespace: dict[str, dict[str, str]] = {}
     source_by_namespace: dict[str, dict[str, str]] = {}
     emitted_unit_ids: set[str] = set()
@@ -443,8 +472,7 @@ def make_resource_pack(args: argparse.Namespace) -> int:
             segment_entry_count += 1
 
     if errors:
-        for error in errors:
-            print(error, file=sys.stderr)
+        print_blocking_errors(errors, f"resource-pack export blocked: {len(errors)} error(s)")
         return 1
 
     pack = {
@@ -1015,6 +1043,12 @@ def make_workpacks(args: argparse.Namespace) -> int:
 def export_table(args: argparse.Namespace) -> int:
     rows = selected_rows(read_jsonl(Path(args.units).resolve()), args)
     out = Path(args.out).resolve()
+    errors: list[str] = []
+    for row in rows:
+        errors.extend(unit_encoding_errors(row))
+    if errors:
+        print_blocking_errors(errors, f"table export blocked: {len(errors)} encoding error(s)")
+        return 1
     out.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "id",
@@ -1045,13 +1079,20 @@ def import_table(args: argparse.Namespace) -> int:
     table_path = Path(args.table).resolve()
     out = Path(args.out).resolve()
     updates: dict[str, dict[str, str]] = {}
+    errors: list[str] = []
 
     with table_path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle, dialect="excel-tab")
         for row in reader:
+            line = reader.line_num
+            errors.extend(replacement_character_errors(row.get("translation", ""), "TSV translation", line))
+            errors.extend(replacement_character_errors(row.get("notes", ""), "TSV notes", line))
             row_id = str(row.get("id", "")).strip()
             if row_id:
                 updates[row_id] = row
+    if errors:
+        print_blocking_errors(errors, f"table import blocked: {len(errors)} encoding error(s)")
+        return 1
 
     changed = 0
     for row in base_rows:
@@ -1076,6 +1117,12 @@ def import_table(args: argparse.Namespace) -> int:
 def export_segment_table(args: argparse.Namespace) -> int:
     rows = selected_rows(read_jsonl(Path(args.units).resolve()), args)
     out = Path(args.out).resolve()
+    errors: list[str] = []
+    for row in rows:
+        errors.extend(unit_encoding_errors(row))
+    if errors:
+        print_blocking_errors(errors, f"segment table export blocked: {len(errors)} encoding error(s)")
+        return 1
     out.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "unit_id",
@@ -1132,10 +1179,15 @@ def import_segment_table(args: argparse.Namespace) -> int:
     by_id = {str(row.get("id", "")): row for row in base_rows}
     updates: dict[tuple[str, int], str] = {}
     unit_translation_updates: dict[str, str] = {}
+    errors: list[str] = []
 
     with table_path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle, dialect="excel-tab")
         for row in reader:
+            line = reader.line_num
+            errors.extend(replacement_character_errors(row.get("translation", ""), "TSV segment translation", line))
+            errors.extend(replacement_character_errors(row.get("unit_translation", ""), "TSV unit_translation", line))
+            errors.extend(replacement_character_errors(row.get("notes", ""), "TSV notes", line))
             unit_id = str(row.get("unit_id", "")).strip()
             if not unit_id:
                 continue
@@ -1149,6 +1201,9 @@ def import_segment_table(args: argparse.Namespace) -> int:
             unit_translation = row.get("unit_translation", "")
             if unit_translation:
                 unit_translation_updates[unit_id] = unit_translation
+    if errors:
+        print_blocking_errors(errors, f"segment table import blocked: {len(errors)} encoding error(s)")
+        return 1
 
     changed = 0
     for unit_id, unit_translation in unit_translation_updates.items():
@@ -1295,6 +1350,13 @@ def merge_translations(args: argparse.Namespace) -> int:
         for file_path in files:
             update_rows.extend(read_jsonl_file(file_path))
 
+    update_encoding_errors: list[str] = []
+    for row in update_rows:
+        update_encoding_errors.extend(unit_encoding_errors(row))
+    if update_encoding_errors:
+        print_blocking_errors(update_encoding_errors, f"merge blocked: {len(update_encoding_errors)} input encoding error(s)")
+        return 1
+
     changed, unknown, conflicts, updated_ids = apply_translation_updates(
         base_rows,
         update_rows,
@@ -1308,6 +1370,13 @@ def merge_translations(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         print(f"merge blocked: {len(conflicts)} conflict(s)", file=sys.stderr)
+        return 1
+
+    encoding_errors: list[str] = []
+    for row in base_rows:
+        encoding_errors.extend(unit_encoding_errors(row))
+    if encoding_errors:
+        print_blocking_errors(encoding_errors, f"merge blocked: {len(encoding_errors)} encoding error(s)")
         return 1
 
     write_jsonl(out, base_rows)

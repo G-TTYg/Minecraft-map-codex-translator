@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-from mcmap_contract import ensure_segments, make_project_files, normalize_key_piece, read_jsonl, require_locale, stable_id, utc_now, write_json
+from mcmap_contract import ensure_segments, make_project_files, normalize_key_piece, print_blocking_errors, read_jsonl, require_locale, stable_id, unit_encoding_errors, utc_now, write_json
 
 
 LANG_PATH_RE = re.compile(r"(?:^|.*[!/])assets/([^/]+)/lang/([a-z]{2,3}_[a-z0-9]{2,8})\.json$")
@@ -113,7 +113,12 @@ class NbtStringReader:
 
     def nbt_string(self) -> str:
         length = self.u16()
-        return self.take(length).decode("utf-8", errors="replace")
+        start = self.pos
+        data = self.take(length)
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise NbtReadError(f"invalid UTF-8 in NBT string at byte {start + exc.start}") from exc
 
     def scan(self) -> list[tuple[str, str]]:
         tag_type = self.u8()
@@ -210,7 +215,12 @@ class NbtTreeReader:
 
     def nbt_string(self) -> str:
         length = self.u16()
-        return self.take(length).decode("utf-8", errors="replace")
+        start = self.pos
+        data = self.take(length)
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise NbtReadError(f"invalid UTF-8 in NBT string at byte {start + exc.start}") from exc
 
     def read(self) -> NbtTree:
         root_type = self.u8()
@@ -1303,6 +1313,7 @@ def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, A
         f"- Scanned files: {report['scanned_files']}",
         f"- Binary units: {report['binary_unit_count']}",
         f"- Pending/failed binary files: {len(report['pending_binary_parser_coverage'])}",
+        f"- Encoding warnings: {report.get('encoding_warning_count', 0)}",
         "",
         "## Counts By Kind",
         "",
@@ -1324,6 +1335,10 @@ def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, A
     for raw, count in sorted(raw_counts.items(), key=lambda item: (-item[1], item[0]))[:20]:
         sample = raw[:160] + ("..." if len(raw) > 160 else "")
         lines.append(f"- {count}x `{sample}`")
+    if report.get("encoding_warnings"):
+        lines.extend(["", "## Encoding Warnings", ""])
+        for warning in report["encoding_warnings"][:20]:
+            lines.append(f"- {warning}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -1368,6 +1383,13 @@ def scan_source(args: argparse.Namespace) -> int:
 
     unit_path = out / "translation_units.jsonl"
     write_jsonl(unit_path, units)
+    encoding_warnings: list[str] = [
+        warning
+        for warning in warnings
+        if "invalid UTF-8" in warning or "cannot decode" in warning or "UnicodeDecodeError" in warning
+    ]
+    for row in units:
+        encoding_warnings.extend(unit_encoding_errors(row))
 
     project = {
         "schema": "mc-map-translate-project.v1",
@@ -1395,6 +1417,8 @@ def scan_source(args: argparse.Namespace) -> int:
         "mode": args.mode,
         "pending_binary_parser_coverage": sorted(set(pending_binary)),
         "warnings": warnings,
+        "encoding_warning_count": len(encoding_warnings),
+        "encoding_warnings": encoding_warnings[:200],
         "counts_by_kind": count_by(units, "source_kind"),
         "counts_by_mode": count_modes(units),
         "top_source_files": top_counts(units, "source_file"),
@@ -2243,6 +2267,12 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
             out.unlink()
 
     rows, selection_skipped = select_hybrid_rows(read_jsonl(translations), args)
+    encoding_errors: list[str] = []
+    for row in rows:
+        encoding_errors.extend(unit_encoding_errors(row))
+    if encoding_errors:
+        print_blocking_errors(encoding_errors, f"hybrid apply blocked: {len(encoding_errors)} encoding error(s)")
+        return 1
     state = ApplyState(dry_run=args.dry_run, multi_text_mode=args.multi_text_mode)
 
     if args.report:
@@ -2323,6 +2353,12 @@ def apply_direct_nbt_strings(args: argparse.Namespace) -> int:
             out.unlink()
 
     rows, selection_skipped = select_direct_nbt_rows(read_jsonl(translations), args)
+    encoding_errors: list[str] = []
+    for row in rows:
+        encoding_errors.extend(unit_encoding_errors(row))
+    if encoding_errors:
+        print_blocking_errors(encoding_errors, f"direct NBT apply blocked: {len(encoding_errors)} encoding error(s)")
+        return 1
     state = ApplyState(dry_run=args.dry_run, multi_text_mode="skip")
 
     if args.report:
