@@ -38,4 +38,4 @@ Use real parsers for NBT, JSON, SNBT, and command-aware structures whenever avai
 
 The bundled `mcmap_java_tools.py scan` covers Java language JSON, datapack JSON text components, `.mcfunction` JSON text components, `.dat` NBT strings, and supported `.mca` region chunks. It reports unsupported or failed binary files as pending coverage instead of guessing from raw bytes.
 
-For apply, only parsed JSON text component anchors are eligible for hybrid key injection. Plain NBT strings from broad path hints are retained for review or explicit direct patching, but they are not safe resource-pack key-injection targets.
+For apply, only parsed JSON text component anchors are eligible for hybrid key injection. Plain NBT strings from broad path hints are not safe resource-pack key-injection targets; apply them only with explicit copied-world direct replacement through `apply-direct-nbt-strings`.

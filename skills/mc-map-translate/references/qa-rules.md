@@ -12,6 +12,7 @@ Use this reference before apply or export.
 - For patched worlds, validate each changed NBT/SNBT/JSON file with the appropriate parser.
 - Ensure exported zip roots are correct: `pack.mcmeta` must be at the resource-pack root.
 - After `apply-hybrid-keys`, inspect `mcmap_hybrid_apply_report.json` and rescan the copied world or copied zip when practical.
+- After `apply-direct-nbt-strings`, inspect `mcmap_direct_nbt_apply_report.json` and rescan the copied world or copied zip when practical.
 
 ## Translation QA
 
@@ -49,6 +50,7 @@ For any world patch, report:
 - Known unhandled source kinds.
 - Commands or text components that could not be safely transformed.
 - `segment_count_mismatch`, `segment_source_text_mismatch`, `existing_translate_conflict`, `multiple_text_nodes`, and other skip reasons from the hybrid apply report.
+- `source_text_mismatch`, `translation_too_long_for_nbt_string`, `missing_region_chunk_anchor`, and other skip reasons from the direct NBT apply report.
 
 ## Workpack QA
 

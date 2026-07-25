@@ -98,9 +98,9 @@ For `.dat` and `.mca` sources, `address` may include:
 - `nbt_path`: Path to the string inside the parsed NBT tree.
 - `chunk`: Region/chunk metadata, including `region_x`, `region_z`, `chunk_x`, `chunk_z`, and `local_index`.
 
-These anchors are sufficient for QA and future apply tooling, but direct patching still needs a dedicated apply command.
+These anchors are sufficient for QA and copied-world apply tooling.
 
-For JSON text component strings in `.dat` or `.mca`, `apply-hybrid-keys` can use `nbt_path`, optional `chunk`, `json_path`, and optional `command_span` to patch the copied NBT data. Plain NBT strings without `json_path` are not hybrid key-injection targets.
+For JSON text component strings in `.dat` or `.mca`, `apply-hybrid-keys` can use `nbt_path`, optional `chunk`, `json_path`, and optional `command_span` to patch the copied NBT data. Plain NBT strings without `json_path` are not hybrid key-injection targets; `apply-direct-nbt-strings` can replace them directly in a copied world when the current NBT string still exactly equals `raw` and `translation` is filled.
 
 ## Translation JSONL
 

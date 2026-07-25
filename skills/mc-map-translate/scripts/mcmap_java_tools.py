@@ -1536,6 +1536,69 @@ def select_hybrid_rows(rows: list[dict[str, Any]], args: argparse.Namespace) -> 
     return selected, skipped
 
 
+def select_direct_nbt_rows(rows: list[dict[str, Any]], args: argparse.Namespace) -> tuple[list[dict[str, Any]], Counter[str]]:
+    selected: list[dict[str, Any]] = []
+    skipped: Counter[str] = Counter()
+    source_kinds = {part.strip() for part in args.source_kind.split(",") if part.strip()}
+    unit_ids = {part.strip() for part in args.unit_id.split(",") if part.strip()}
+    seen_ids: set[str] = set()
+
+    for row in rows:
+        row_id = str(row.get("id", ""))
+        if row_id in seen_ids:
+            skipped["duplicate_unit_id"] += 1
+            continue
+        seen_ids.add(row_id)
+        if row.get("edition") != "java":
+            skipped["non_java"] += 1
+            continue
+        if "embedded-direct" not in row.get("mode_support", []):
+            skipped["not_embedded_direct"] += 1
+            continue
+        if not confidence_allows(row, args.min_confidence):
+            skipped["below_min_confidence"] += 1
+            continue
+        if source_kinds and str(row.get("source_kind", "")) not in source_kinds:
+            skipped["filtered_source_kind"] += 1
+            continue
+        if unit_ids and row_id not in unit_ids:
+            skipped["filtered_unit_id"] += 1
+            continue
+
+        address = row.get("address") if isinstance(row.get("address"), dict) else {}
+        if isinstance(address.get("json_path"), str) or isinstance(address.get("command_span"), list):
+            skipped["not_plain_nbt_string"] += 1
+            continue
+        if not isinstance(address.get("nbt_path"), str) or not address.get("nbt_path"):
+            skipped["missing_nbt_path"] += 1
+            continue
+
+        source_file = str(row.get("source_file", "")).lower()
+        if not (source_file.endswith(".dat") or source_file.endswith(".mca")):
+            skipped["unsupported_direct_file_type"] += 1
+            continue
+
+        translation = str(row.get("translation", ""))
+        if not translation.strip() and not args.allow_empty_translation:
+            skipped["missing_translation"] += 1
+            continue
+        protected = row.get("protected", [])
+        if not isinstance(protected, list):
+            protected = []
+        missing_protected = [
+            str(token)
+            for token in protected
+            if str(token) and str(token) not in translation
+        ]
+        if missing_protected:
+            skipped["protected_token_missing"] += 1
+            continue
+
+        selected.append(row)
+
+    return selected, skipped
+
+
 def safe_rel_path(value: str) -> PurePosixPath | None:
     if "!" in value:
         return None
@@ -1754,6 +1817,94 @@ def patch_nbt_blob(data: bytes, rows: list[dict[str, Any]], state: ApplyState) -
     return write_nbt_tree(tree), True
 
 
+def mark_direct_rows_skipped(rows: list[dict[str, Any]], state: ApplyState, reason: str, detail: str = "") -> None:
+    for row in rows:
+        state.mark_skip(row, reason, detail)
+
+
+def mark_direct_rows_already(rows: list[dict[str, Any]], state: ApplyState) -> None:
+    for row in rows:
+        state.mark_already(row)
+
+
+def mark_direct_rows_changed(rows: list[dict[str, Any]], state: ApplyState) -> None:
+    for row in rows:
+        state.mark_changed(row, str(row.get("source_file", "")))
+
+
+def patch_direct_nbt_string_value(value: str, rows: list[dict[str, Any]], state: ApplyState) -> tuple[str, bool]:
+    raw_values = {str(row.get("raw", "")) for row in rows}
+    translations = {str(row.get("translation", "")) for row in rows}
+    if len(raw_values) != 1 or len(translations) != 1:
+        mark_direct_rows_skipped(rows, state, "direct_nbt_path_conflict")
+        return value, False
+
+    raw = next(iter(raw_values))
+    translation = next(iter(translations))
+    if len(translation.encode("utf-8")) > 65535:
+        mark_direct_rows_skipped(rows, state, "translation_too_long_for_nbt_string")
+        return value, False
+
+    if value == translation:
+        mark_direct_rows_already(rows, state)
+        return value, False
+    if value != raw:
+        mark_direct_rows_skipped(rows, state, "source_text_mismatch", f"expected {raw[:120]!r}, found {value[:120]!r}")
+        return value, False
+
+    mark_direct_rows_changed(rows, state)
+    return translation, True
+
+
+def patch_direct_nbt_tag_strings(
+    tag: NbtTag,
+    path: str,
+    rows_by_nbt_path: dict[str, list[dict[str, Any]]],
+    state: ApplyState,
+) -> bool:
+    changed_any = False
+    if tag.tag_type == 8:
+        rows = rows_by_nbt_path.get(path, [])
+        if rows:
+            new_value, changed = patch_direct_nbt_string_value(str(tag.value), rows, state)
+            if changed:
+                tag.value = new_value
+                changed_any = True
+        return changed_any
+
+    if tag.tag_type == 9:
+        child_type, items = tag.value
+        for index, child in enumerate(items):
+            changed_any = patch_direct_nbt_tag_strings(child, f"{path}[{index}]", rows_by_nbt_path, state) or changed_any
+        tag.value = (child_type, items)
+        return changed_any
+
+    if tag.tag_type == 10:
+        for name, child in tag.value:
+            child_path = f"{path}.{name}" if path else name
+            changed_any = patch_direct_nbt_tag_strings(child, child_path, rows_by_nbt_path, state) or changed_any
+    return changed_any
+
+
+def patch_direct_nbt_blob(data: bytes, rows: list[dict[str, Any]], state: ApplyState) -> tuple[bytes, bool]:
+    tree = NbtTreeReader(data).read()
+    rows_by_nbt_path: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        nbt_path = row.get("address", {}).get("nbt_path")
+        if isinstance(nbt_path, str) and nbt_path:
+            rows_by_nbt_path[nbt_path].append(row)
+        else:
+            state.mark_skip(row, "missing_nbt_path")
+
+    changed = patch_direct_nbt_tag_strings(tree.root, tree.root_path, rows_by_nbt_path, state)
+    for row in rows:
+        if state.row_id(row) not in state.status_by_id:
+            state.mark_skip(row, "nbt_path_missing")
+    if not changed:
+        return data, False
+    return write_nbt_tree(tree), True
+
+
 def patch_dat_file(path: Path, source_file: str, rows: list[dict[str, Any]], state: ApplyState) -> bool:
     original = path.read_bytes()
     gzip_wrapped = original.startswith(b"\x1f\x8b")
@@ -1763,6 +1914,23 @@ def patch_dat_file(path: Path, source_file: str, rows: list[dict[str, Any]], sta
     except Exception as exc:
         for row in rows:
             state.mark_skip(row, "dat_patch_failed", str(exc))
+        return False
+    if changed and not state.dry_run:
+        path.write_bytes(gzip.compress(patched) if gzip_wrapped else patched)
+    if changed:
+        state.changed_files.add(source_file)
+    return changed
+
+
+def patch_dat_file_direct(path: Path, source_file: str, rows: list[dict[str, Any]], state: ApplyState) -> bool:
+    original = path.read_bytes()
+    gzip_wrapped = original.startswith(b"\x1f\x8b")
+    try:
+        payload = decompress_dat_payload(original)
+        patched, changed = patch_direct_nbt_blob(payload, rows, state)
+    except Exception as exc:
+        for row in rows:
+            state.mark_skip(row, "dat_direct_patch_failed", str(exc))
         return False
     if changed and not state.dry_run:
         path.write_bytes(gzip.compress(patched) if gzip_wrapped else patched)
@@ -1895,6 +2063,71 @@ def patch_region_file(path: Path, source_file: str, rows: list[dict[str, Any]], 
     return changed_file
 
 
+def patch_region_file_direct(path: Path, source_file: str, rows: list[dict[str, Any]], state: ApplyState) -> bool:
+    data = path.read_bytes()
+    if len(data) < 8192:
+        for row in rows:
+            state.mark_skip(row, "region_file_too_small")
+        return False
+
+    rows_by_chunk: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        chunk = row.get("address", {}).get("chunk")
+        local_index = chunk.get("local_index") if isinstance(chunk, dict) else None
+        if isinstance(local_index, int) and 0 <= local_index < 1024:
+            rows_by_chunk[local_index].append(row)
+        else:
+            state.mark_skip(row, "missing_region_chunk_anchor")
+
+    chunk_records: dict[int, bytes] = {}
+    changed_file = False
+    for index in range(1024):
+        loc = data[index * 4 : index * 4 + 4]
+        sector_offset = int.from_bytes(loc[:3], "big")
+        sector_count = loc[3]
+        if sector_offset == 0 or sector_count == 0:
+            continue
+        offset = sector_offset * 4096
+        if offset + 5 > len(data):
+            for row in rows_by_chunk.get(index, []):
+                state.mark_skip(row, "region_chunk_outside_file")
+            continue
+        raw_record = data[offset : offset + sector_count * 4096]
+        length = int.from_bytes(raw_record[:4], "big")
+        compression = raw_record[4]
+        payload = raw_record[5 : 4 + length]
+        chunk_rows = rows_by_chunk.get(index, [])
+        if not chunk_rows:
+            chunk_records[index] = raw_record[: 4 + length]
+            continue
+        try:
+            nbt_payload = decompress_region_payload(compression, payload)
+            patched_nbt, changed = patch_direct_nbt_blob(nbt_payload, chunk_rows, state)
+            if changed:
+                patched_payload = compress_region_payload(compression, patched_nbt)
+                record = (len(patched_payload) + 1).to_bytes(4, "big") + bytes([compression]) + patched_payload
+                chunk_records[index] = record
+                changed_file = True
+            else:
+                chunk_records[index] = raw_record[: 4 + length]
+        except Exception as exc:
+            chunk_records[index] = raw_record[: 4 + length]
+            for row in chunk_rows:
+                state.mark_skip(row, "region_chunk_direct_patch_failed", str(exc))
+
+    for chunk_index, chunk_rows in rows_by_chunk.items():
+        loc = data[chunk_index * 4 : chunk_index * 4 + 4]
+        if loc == b"\x00\x00\x00\x00":
+            for row in chunk_rows:
+                state.mark_skip(row, "region_chunk_missing")
+
+    if changed_file and not state.dry_run:
+        path.write_bytes(build_region_file(data, chunk_records))
+    if changed_file:
+        state.changed_files.add(source_file)
+    return changed_file
+
+
 def copy_source_to_workdir(source: Path, workdir: Path) -> None:
     if source.is_dir():
         shutil.copytree(source, workdir)
@@ -1923,6 +2156,12 @@ def default_apply_report_path(out: Path, is_zip_output: bool) -> Path:
     if is_zip_output:
         return out.with_suffix(out.suffix + ".mcmap_hybrid_apply_report.json")
     return out / "mcmap_hybrid_apply_report.json"
+
+
+def default_direct_apply_report_path(out: Path, is_zip_output: bool) -> Path:
+    if is_zip_output:
+        return out.with_suffix(out.suffix + ".mcmap_direct_nbt_apply_report.json")
+    return out / "mcmap_direct_nbt_apply_report.json"
 
 
 def world_file_path(root: Path, source_file: str) -> Path | None:
@@ -1959,6 +2198,31 @@ def patch_world_copy(root: Path, rows: list[dict[str, Any]], state: ApplyState) 
         else:
             for row in file_rows:
                 state.mark_skip(row, "unsupported_apply_file_type")
+
+
+def patch_direct_nbt_world_copy(root: Path, rows: list[dict[str, Any]], state: ApplyState) -> None:
+    rows_by_file: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        source_file = str(row.get("source_file", ""))
+        if safe_rel_path(source_file) is None:
+            state.mark_skip(row, "unsupported_nested_or_unsafe_source_path")
+            continue
+        rows_by_file[source_file].append(row)
+
+    for source_file, file_rows in sorted(rows_by_file.items()):
+        path = world_file_path(root, source_file)
+        if path is None or not path.exists():
+            for row in file_rows:
+                state.mark_skip(row, "source_file_missing_in_copy")
+            continue
+        lowered = source_file.lower()
+        if lowered.endswith(".dat"):
+            patch_dat_file_direct(path, source_file, file_rows, state)
+        elif lowered.endswith(".mca"):
+            patch_region_file_direct(path, source_file, file_rows, state)
+        else:
+            for row in file_rows:
+                state.mark_skip(row, "unsupported_direct_apply_file_type")
 
 
 def apply_hybrid_keys(args: argparse.Namespace) -> int:
@@ -2029,6 +2293,81 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
         "skipped": dict(sorted(state.skipped.items())),
         "skipped_samples": state.skipped_samples,
         "resource_pack_embedded": bool(args.resource_pack and not args.dry_run),
+    }
+    write_json(report_path, report)
+
+    print(f"copied_world: {out}")
+    print(f"apply_report: {report_path}")
+    print(f"selected_units: {len(rows)}")
+    print(f"changed_units: {state.changed_units}")
+    print(f"changed_files: {len(state.changed_files)}")
+    print(f"skipped_units: {sum(state.skipped.values())}")
+    return 0 if state.changed_units or args.allow_no_changes else 3
+
+
+def apply_direct_nbt_strings(args: argparse.Namespace) -> int:
+    source = Path(args.source).resolve()
+    out = Path(args.out).resolve()
+    translations = Path(args.translations).resolve()
+    is_zip_output = out.suffix.lower() == ".zip"
+
+    if source.is_dir():
+        if out == source or is_relative_to(out, source):
+            raise ValueError("--out must not be the original world or inside it")
+    if out.exists():
+        if not args.force:
+            raise FileExistsError(f"output already exists; pass --force to replace: {out}")
+        if out.is_dir():
+            shutil.rmtree(out)
+        else:
+            out.unlink()
+
+    rows, selection_skipped = select_direct_nbt_rows(read_jsonl(translations), args)
+    state = ApplyState(dry_run=args.dry_run, multi_text_mode="skip")
+
+    if args.report:
+        report_path = Path(args.report).resolve()
+    elif args.dry_run and not is_zip_output:
+        report_path = out.with_name(out.name + ".mcmap_direct_nbt_apply_report.json")
+    else:
+        report_path = default_direct_apply_report_path(out, is_zip_output)
+
+    def run_on_copy(workdir: Path) -> None:
+        copy_source_to_workdir(source, workdir)
+        patch_direct_nbt_world_copy(workdir, rows, state)
+
+    if args.dry_run:
+        with tempfile.TemporaryDirectory(prefix="mcmap-direct-") as tmp:
+            run_on_copy(Path(tmp) / "world")
+    elif is_zip_output:
+        with tempfile.TemporaryDirectory(prefix="mcmap-direct-") as tmp:
+            workdir = Path(tmp) / "world"
+            run_on_copy(workdir)
+            zip_any_dir(workdir, out)
+    else:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        run_on_copy(out)
+
+    for row in rows:
+        if state.row_id(row) not in state.status_by_id:
+            state.mark_skip(row, "not_processed")
+
+    report = {
+        "schema": "mc-map-translate-direct-nbt-apply-report.v1",
+        "created_at": utc_now(),
+        "source": str(source),
+        "output": str(out),
+        "translations_file": str(translations),
+        "dry_run": args.dry_run,
+        "selected_units": len(rows),
+        "selection_skipped": dict(sorted(selection_skipped.items())),
+        "changed_units": state.changed_units,
+        "already_applied_units": state.already_applied,
+        "changed_files": sorted(state.changed_files),
+        "changed_file_count": len(state.changed_files),
+        "skipped": dict(sorted(state.skipped.items())),
+        "skipped_samples": state.skipped_samples,
+        "risk": "embedded-direct plain NBT string replacement; source text must match exactly and original source is never edited",
     }
     write_json(report_path, report)
 
@@ -2132,6 +2471,20 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--allow-no-changes", action="store_true", help="return success even when no units changed")
     apply.add_argument("--force", action="store_true", help="replace an existing output copy")
     apply.set_defaults(func=apply_hybrid_keys)
+
+    direct = subparsers.add_parser("apply-direct-nbt-strings", help="patch copied Java world plain NBT strings with translated text")
+    direct.add_argument("source", help="original Java world directory or map zip")
+    direct.add_argument("--translations", required=True, help="translation_units.jsonl or translations.jsonl containing embedded-direct plain NBT units")
+    direct.add_argument("--out", required=True, help="copied world output directory or .zip")
+    direct.add_argument("--min-confidence", choices=["low", "medium", "high"], default="medium", help="minimum scanner confidence to apply")
+    direct.add_argument("--source-kind", default="", help="comma-separated source_kind filter")
+    direct.add_argument("--unit-id", default="", help="comma-separated unit id filter")
+    direct.add_argument("--allow-empty-translation", action="store_true", help="allow empty translations to replace source strings")
+    direct.add_argument("--dry-run", action="store_true", help="copy to a temporary directory and report what would change")
+    direct.add_argument("--report", default="", help="custom apply report JSON path")
+    direct.add_argument("--allow-no-changes", action="store_true", help="return success even when no units changed")
+    direct.add_argument("--force", action="store_true", help="replace an existing output copy")
+    direct.set_defaults(func=apply_direct_nbt_strings)
 
     zip_pack = subparsers.add_parser("zip-resource-pack", help="zip a resource-pack directory")
     zip_pack.add_argument("resource_pack", help="resource pack directory with pack.mcmeta at root")

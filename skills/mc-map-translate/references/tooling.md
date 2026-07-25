@@ -30,6 +30,7 @@ The plugin includes its own standard tools. Do not depend on MCC-i18n or copy it
 - `inspect`: detect Java map/package markers and Bedrock-only markers.
 - `scan`: scan Java resource-pack language JSON, datapack JSON text components, `.mcfunction` JSON text components, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Pass `--project-layout` to also create the indexed multi-file layout.
 - `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy.
+- `apply-direct-nbt-strings`: copy/extract a Java world or map zip and directly replace translated plain NBT strings in `.dat` and `.mca` files when exact anchors match.
 - `zip-resource-pack`: zip a resource pack directory with the correct root.
 - `embed-resource-pack`: copy a Java world and add `resources.zip` to the copy.
 
@@ -85,6 +86,12 @@ python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys <wo
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys <world-or-zip> --translations <workdir> --out <workdir>/exports/world-keyed.zip
 ```
 
+For translated plain NBT strings that cannot be key-injected:
+
+```bash
+python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-direct-nbt-strings <world-or-zip> --translations <workdir> --out <workdir>/exports/world-direct-nbt.zip
+```
+
 To ship a copied world with the pack embedded:
 
 ```bash
@@ -111,6 +118,18 @@ Safety limits:
 - Plain NBT strings without JSON text component context are not hybrid-key-injection targets; they require explicit `embedded-direct` handling.
 
 Use `--multi-text-mode skip` only when you want the old conservative behavior for audit or comparison.
+
+## Apply-Direct-NBT-Strings Behavior
+
+`apply-direct-nbt-strings` never edits the source path. It selects only Java units with `embedded-direct`, an `address.nbt_path`, no `json_path`, a supported `.dat` or `.mca` source file, and a filled `translation` unless `--allow-empty-translation` is passed.
+
+Safety limits:
+
+- Every target NBT string must still exactly equal the unit `raw`; otherwise it is skipped.
+- `.mca` rows must include a chunk `local_index` anchor.
+- Translations longer than the Java NBT string limit are skipped.
+- JSON text components and command JSON spans are skipped here; use `apply-hybrid-keys` for those.
+- The command writes `mcmap_direct_nbt_apply_report.json` or a sidecar report for zip output.
 
 ## Coverage Limits
 

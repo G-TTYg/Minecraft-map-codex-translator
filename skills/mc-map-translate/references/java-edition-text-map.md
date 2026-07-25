@@ -51,7 +51,7 @@ High risk:
 - Plain NBT strings from broad path hints.
 - Puzzle text, spelling-dependent clues, command-generated UI, or text mixed with selectors and score values.
 
-Plain `nbt_text` units without JSON text component context are not hybrid key-injection targets. They can be reviewed for `embedded-direct` output, or left as known uncovered text in a resource-pack-first workflow.
+Plain `nbt_text` units without JSON text component context are not hybrid key-injection targets. They can be applied only through explicit `embedded-direct` copied-world output with `apply-direct-nbt-strings`, or left as known uncovered text in a resource-pack-first workflow.
 
 ## Translation Key Strategy
 

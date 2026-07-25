@@ -28,6 +28,7 @@ Use this reference when the target is Java Edition and the user wants a non-inva
 - Replace literal text directly inside copied map data.
 - Use only when the user explicitly does not want a resource pack.
 - Treat as high risk and require full backup, precise anchors, and validation.
+- For plain NBT strings that are not JSON text components, use `apply-direct-nbt-strings`; it requires exact `nbt_path` anchors and exact source-text matches in copied `.dat` or `.mca` data.
 
 ## Resource Pack Layout
 
@@ -73,4 +74,4 @@ Do not hardcode `pack_format` unless the user specifies the Minecraft version. I
 
 For Java worlds, a copied world can include `resources.zip` at the world root. This makes the map prompt/load its intended resource pack without asking every player to manually install a standalone pack. Still treat this as an export of a copied world, not as an in-place modification.
 
-For zip input, `apply-hybrid-keys` can write a copied output zip directly. For directory input, it can write a copied directory and optionally embed the generated resource pack as `resources.zip`.
+For zip input, `apply-hybrid-keys` and `apply-direct-nbt-strings` can write copied output zips directly. For directory input, they can write copied directories; `apply-hybrid-keys` can also embed the generated resource pack as `resources.zip`.

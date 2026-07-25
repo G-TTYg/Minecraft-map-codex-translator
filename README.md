@@ -12,6 +12,7 @@ The plugin provides the `mc-map-translate` skill plus deterministic scripts for:
 - preparing and importing multi-text segment translations for AI-assisted fine localization;
 - exporting resource-pack language files;
 - safely applying hybrid translation-key injection to copied worlds or copied map zips.
+- directly applying translated plain NBT strings to copied worlds or copied map zips when explicit `embedded-direct` output is needed.
 
 ## Safety Model
 
@@ -32,6 +33,7 @@ python skills/mc-map-translate/scripts/mcmap_contract.py write-progress-todo wor
 python skills/mc-map-translate/scripts/mcmap_contract.py merge-translations work/map/translations/parts --base work/map/translation_units.jsonl --out work/map/translations/translations.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack work/map --out work/map/exports/hybrid-resource-pack --pack-format 34 --target zh_cn --include-hybrid-keys
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world-or-map.zip --translations work/map --out work/map/exports/world-keyed.zip --resource-pack work/map/exports/hybrid-resource-pack
+python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-direct-nbt-strings path/to/world-or-map.zip --translations work/map --out work/map/exports/world-direct-nbt.zip
 ```
 
 For large maps, Codex should treat `index/manifest.json` as the entry point, maintain `translation_progress.md` as the workpack TODO list, translate one `workpacks/contextual/workpack_###.jsonl` at a time, read only that workpack's listed source summaries, and write results into the matching `translations/parts/workpack_###.jsonl`.
