@@ -43,6 +43,8 @@ If a term appears in lore and gameplay instructions, choose one translation that
 - Do not translate internal IDs such as `minecraft:diamond_sword`.
 - Keep selectors, placeholders, color codes, keybind IDs, score expressions, and command syntax unchanged.
 - Preserve newline shape unless a UI-length issue requires a controlled change.
+- Preserve escape shape. A JSONL file may show a real newline as `\n` because JSON serializes it that way; keep it as a real newline in the decoded value. If the decoded source text contains literal backslash+n (`\\n`), keep those two characters unless the command/JSON/SNBT layer is being deliberately rewritten.
+- Treat backslash escapes such as `\n`, `\t`, `\"`, `\\`, and `\uXXXX` as protected syntax until proven to be ordinary prose. Do not double-escape them and do not let a spreadsheet, shell, or model rewrite turn them into another layer.
 - Preserve JSON text component styling and events.
 
 ## Multilingual Encoding
@@ -50,6 +52,7 @@ If a term appears in lore and gameplay instructions, choose one translation that
 - Treat all translation text as Unicode and all project artifacts as UTF-8 unless a source format explicitly says otherwise.
 - Do not judge non-ASCII text only from PowerShell, cmd, or shell output. If display looks corrupt, inspect the JSON/JSONL/TSV file with an explicit UTF-8 reader or compare escaped code points.
 - Do not paste terminal-mojibake back into translation files. Re-open the original UTF-8 artifact and repair the affected rows before validation or export.
+- Do not repair apparent `\n` sequences by hand without checking the decoded JSON value. In JSON/JSONL display, `\n` often means an actual line break; in SNBT or command strings it may be a literal escape that Minecraft/JSON will interpret later.
 - Preserve intentional full-width punctuation, combining marks, accents, kana/han/hangul, right-to-left text, emoji, and Minecraft section sign formatting. Do not normalize Unicode unless the target language or a QA finding requires it.
 - Watch custom font providers and bitmap fonts in resource packs. A string can be valid UTF-8 but still render as missing glyphs in-game; report that as a font/rendering QA issue, not as a translation success.
 
@@ -76,5 +79,6 @@ Before finalizing a batch, ask internally:
 - Does the tone match the scene?
 - Are names and terms consistent with the glossary?
 - Did any protected token change?
+- Did any escape sequence or newline shape change accidentally?
 - Did the translation become too long for the expected display surface?
 - Did every target-language character survive UTF-8 read/write and table import/export without mojibake?

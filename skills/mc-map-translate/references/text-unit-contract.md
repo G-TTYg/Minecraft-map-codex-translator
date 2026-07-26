@@ -121,6 +121,17 @@ For JSON text component strings in `.dat` or `.mca`, `apply-hybrid-keys` can use
 
 For quoted JSON text components inside command/SNBT strings, `address.command_string_span` stores the exact quoted string span. `apply-hybrid-keys` decodes the quoted JSON string, injects the generated key, and writes the string back with the original quote style.
 
+## Escape Semantics
+
+JSONL stores decoded string values. When a `raw`, `translation`, or `protected` value appears on disk as `\n`, that may be JSON's serialization of a real newline. It is not automatically the literal two-character sequence backslash+n.
+
+Interpret escape shape from the decoded value:
+
+- A real newline in `raw` should remain a real newline in `translation` unless a controlled layout rewrite is documented.
+- A literal `\\n` in `raw` should remain literal `\\n` in `translation` unless the command/JSON/SNBT layer is intentionally rewritten.
+- Preserve other structural escapes such as `\t`, `\"`, `\\`, and `\uXXXX` when they appear in `protected`.
+- Be extra careful after TSV or spreadsheet round-trips; table tools may display or import multiline fields differently from JSONL.
+
 For JSON text components stored as strings inside datapack JSON, `address.json_string_path` points to the outer JSON string value, while `address.json_path` and `context.text_nodes[]` refer to the decoded component inside that string.
 
 For plain `.mcfunction` messages, `address.command_plain_span` stores the exact unquoted message span. For plain JSON strings inside command JSON spans, `address.command_span` stores the JSON object/array span and `address.command_json_path` stores the string path inside that decoded JSON. For plain SNBT/storage strings inside command strings, `address.command_string_span` stores the exact quoted value. `apply-direct-text` can replace these direct anchors when the current source text still exactly equals `raw`.
@@ -139,6 +150,7 @@ Final translation files may contain the same schema with `translation` filled. F
 - `resource-pack` units must include `translation_key`.
 - `resource_namespace` should be present for every unit that can be exported to a resource pack.
 - `translation` must preserve every protected token exactly.
+- `translation` must preserve escape shape: do not replace a real newline with literal `\\n`, and do not replace literal `\\n` with a real newline unless the row is deliberately rewritten and documented.
 - `segments[].json_path` and `segments[].raw` must match `context.text_nodes`.
 - Sign segments may also include `nbt_path`, `line_index`, and `component_json_path`; keep these unchanged during translation.
 - `segments[].translation_key` must use only lowercase `a-z`, digits, `_`, `.`, and `-`.

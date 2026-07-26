@@ -35,6 +35,7 @@ PROTECTED_TOKEN_RE = re.compile(
     r"|(%(?:\d+\$)?[sdif])"
     r"|(\$\{[^}]+\})"
     r"|(\$\([^)]+\))"
+    r"|(\\(?:[nrtbf\"'/\\]|u[0-9A-Fa-f]{4}))"
     r"|(\u00a7[0-9A-FK-ORa-fk-or])"
     r"|(minecraft:[a-z0-9_./:-]+)"
 )
@@ -576,6 +577,9 @@ def protected_tokens(value: str) -> list[str]:
         token = match.group(0)
         if token not in seen:
             seen.append(token)
+    for token in ("\r\n", "\n", "\r"):
+        if token in value and token not in seen:
+            seen.append(token)
     return seen
 
 
@@ -711,7 +715,10 @@ def decode_snbt_single_quoted(value: str) -> str:
     escaped = False
     for char in value:
         if escaped:
-            result.append(char)
+            if char in {"'", "\\", '"'}:
+                result.append(char)
+            else:
+                result.append("\\" + char)
             escaped = False
         elif char == "\\":
             escaped = True
@@ -754,7 +761,14 @@ def iter_quoted_string_literals(text: str) -> Iterable[StringLiteralSpan]:
 def encode_snbt_string_literal(value: str, quote: str) -> str:
     if quote == '"':
         return json.dumps(value, ensure_ascii=False)
-    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
     return f"'{escaped}'"
 
 

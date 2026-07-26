@@ -60,7 +60,10 @@ The bundled scripts read and write JSON, JSONL, TSV, language JSON, and reports 
 - On Windows, terminal output may misrender valid Unicode. Treat mojibake in the console as a display warning, not proof that the file is corrupt; verify with an explicit UTF-8 reader before changing data.
 - Do not use a lossy console, clipboard, spreadsheet save, or shell pipeline as the only copy of translated non-ASCII text.
 - Treat `U+FFFD` as a blocking data-loss signal. `validate-units`, table export/import, translation merge, resource-pack export, and copied-world apply commands reject rows containing it.
+- Treat backslash escape shape as a blocking data-integrity surface. `validate-units`, resource-pack export, and copied-world apply commands reject obvious confusion between a real newline and literal `\\n`, and between a real tab and literal `\\t`.
+- In JSONL, `\n` on disk can be JSON syntax for a real newline. In command/SNBT/JSON string content, `\\n` can be a literal escape intended for a later parser. Inspect decoded values when uncertain.
 - After table round-trips, rerun `validate-units` and spot-check representative rows for target-language characters, accents, right-to-left text, emoji, section signs, and placeholders.
+- Prefer JSONL editing over TSV for escape-heavy rows. If TSV is used, keep multiline fields quoted by the table tool and do not manually convert line breaks to visible `\\n` sequences.
 
 Codex then translates staged batches:
 

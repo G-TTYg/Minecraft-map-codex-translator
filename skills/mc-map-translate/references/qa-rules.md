@@ -10,6 +10,7 @@ Use this reference before apply or export.
 - Validate target locale filenames use Java locale format such as `ja_jp`, `fr_fr`, or `zh_cn`.
 - Validate TSV imports by running `validate-units` on the merged `translations.jsonl`.
 - Confirm all generated JSON, JSONL, TSV, and language files are valid UTF-8 and contain no replacement characters or mojibake from terminal/table round-trips.
+- Confirm escape shape survived scan, edit, merge, export, and apply: real newlines remain real line breaks; literal `\\n` remains literal backslash+n; JSON/SNBT escapes are not double-escaped or consumed.
 - For patched worlds, validate each changed NBT/SNBT/JSON file with the appropriate parser.
 - Ensure exported zip roots are correct: `pack.mcmeta` must be at the resource-pack root.
 - For copied worlds with embedded packs, ensure `resources.zip` is in the same directory as the copied world's `level.dat`; for map zips with a top-level containing folder, the correct path is usually `<folder>/resources.zip`, not archive-root `resources.zip`.
@@ -22,6 +23,7 @@ Use this reference before apply or export.
 - Translations were produced or reviewed by Codex against map context, not accepted blindly from an external machine-translation service.
 - Protected tokens are unchanged.
 - Selectors, placeholders, color codes, click/hover events, keybinds, and newlines are preserved or intentionally changed with notes.
+- Backslash escapes such as `\n`, `\t`, `\"`, `\\`, and `\uXXXX` are preserved at the correct layer. If changed, the QA report explains which source layer was intentionally rewritten.
 - No accidental translation of internal IDs or command syntax.
 - No untranslated English remains except deliberate names, IDs, or stylistic choices.
 - Glossary terms are consistent.
@@ -52,6 +54,7 @@ Report counts by:
 - Resource-pack visual text asset hints, especially PNG textures and font provider JSON that language JSON cannot cover.
 - Top repeated raw strings and top source files from `scan_review.md`.
 - Any encoding or font-rendering risks found during table round-trip, resource-pack export, copied-world apply, or in-game review.
+- Any escape-shape risks found during JSONL/TSV round-trip, resource-pack export, copied-world apply, or in-game review.
 
 ## Risk Report
 

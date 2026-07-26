@@ -15,6 +15,8 @@ The target language is not fixed. Always use the locale or language requested by
 
 Treat every translation artifact as Unicode data. Read and write JSON, JSONL, TSV, and language files as UTF-8; do not trust terminal display for non-ASCII text, especially on Windows. If text looks like mojibake, replacement characters, or question marks, verify the file bytes or JSON values before applying/exporting.
 
+Treat backslash escapes as structural data. In JSONL, a real newline is serialized on disk as `\n`; that does not mean the two visible characters backslash+n are player text. Conversely, some commands, SNBT strings, storage values, and JSON strings intentionally contain a literal `\\n` escape. Preserve the source escape shape unless deliberately rewriting the surrounding command/JSON layer, and validate before export/apply.
+
 The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injection` only when hardcoded text must be converted to translation keys in a copied world. Use `embedded-direct` only when the user explicitly rejects a resource pack and accepts the higher risk of editing world data directly.
 
 ## Decision Tree
@@ -70,6 +72,7 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - Keep role names, place names, item names, puzzle terms, factions, and UI verbs consistent.
    - Strive for the most complete safe localization possible: translate every player-facing unit that can be safely handled by the selected export modes, and record any remaining uncovered or risky text explicitly.
    - Preserve all protected tokens exactly unless a reference says they are safe to translate.
+   - Preserve escape semantics exactly: do not change a real newline into literal `\\n`, and do not change literal `\\n` into a real newline unless the source layer is intentionally being rewritten and QA notes explain it.
    - For puzzles, riddles, rhymes, lore, and jokes, preserve player experience over word-for-word meaning.
    - For units with `segments[]`, translate `raw` as the complete message first, then fill each `segments[].translation` so the preserved Minecraft component order still reads naturally.
 
@@ -137,6 +140,7 @@ For staged AI translation, treat `index/manifest.json` as the entry point. Load 
 - Do not call external translation APIs, browser translators, or third-party localization services by default. Use Codex plus local project context unless the user explicitly asks otherwise.
 - Do not translate command keywords, selectors, scoreboard objectives, storage paths, entity IDs, item IDs, block IDs, NBT keys, or JSON text component field names.
 - Do not remove formatting, click events, hover events, insertion text, fonts, or keybind references.
+- Do not casually rewrite backslash escapes such as `\n`, `\t`, `\"`, `\\`, or `\uXXXX`; they may belong to JSON, SNBT, command syntax, or Minecraft rendering rather than prose.
 - Do not claim resource-pack-only coverage for hardcoded text unless the map already uses translation keys or the output mode includes key injection.
 - Do not translate a real map without maintaining `translation_progress.md` or an equivalent user-approved persistent progress TODO.
 - Do not apply or export translations that show mojibake, replacement characters, or `?` in place of target-language characters; re-read and repair the UTF-8 source artifact first.

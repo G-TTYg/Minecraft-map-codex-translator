@@ -150,12 +150,40 @@ def replacement_character_errors(value: Any, field: str, line: Any) -> list[str]
     return []
 
 
+def visible_escape(value: str) -> str:
+    return value.encode("unicode_escape").decode("ascii")
+
+
+def escape_shape_errors(raw: Any, translation: Any, field: str, line: Any) -> list[str]:
+    if not isinstance(raw, str) or not isinstance(translation, str) or not translation:
+        return []
+    errors: list[str] = []
+    if "\n" in raw and "\n" not in translation and "\\n" in translation:
+        errors.append(
+            f"line {line}: {field} appears to contain literal \\\\n where the source has a real newline; keep the real line break or note a deliberate rewrite"
+        )
+    if "\\n" in raw and "\\n" not in translation and "\n" in translation:
+        errors.append(
+            f"line {line}: {field} converted literal \\\\n into a real newline; preserve the backslash escape unless the command/JSON layer is being deliberately rewritten"
+        )
+    if "\t" in raw and "\t" not in translation and "\\t" in translation:
+        errors.append(
+            f"line {line}: {field} appears to contain literal \\\\t where the source has a real tab"
+        )
+    if "\\t" in raw and "\\t" not in translation and "\t" in translation:
+        errors.append(
+            f"line {line}: {field} converted literal \\\\t into a real tab"
+        )
+    return errors
+
+
 def unit_encoding_errors(unit: dict[str, Any]) -> list[str]:
     line = unit.get("_line_no", "?")
     errors: list[str] = []
     errors.extend(replacement_character_errors(unit.get("raw", ""), "raw", line))
     errors.extend(replacement_character_errors(unit.get("translation", ""), "translation", line))
     errors.extend(replacement_character_errors(unit.get("notes", ""), "notes", line))
+    errors.extend(escape_shape_errors(unit.get("raw", ""), unit.get("translation", ""), "translation", line))
     segments = unit.get("segments")
     if isinstance(segments, list):
         for offset, segment in enumerate(segments):
@@ -163,6 +191,14 @@ def unit_encoding_errors(unit: dict[str, Any]) -> list[str]:
                 continue
             errors.extend(replacement_character_errors(segment.get("raw", ""), f"segments[{offset}].raw", line))
             errors.extend(replacement_character_errors(segment.get("translation", ""), f"segments[{offset}].translation", line))
+            errors.extend(
+                escape_shape_errors(
+                    segment.get("raw", ""),
+                    segment.get("translation", ""),
+                    f"segments[{offset}].translation",
+                    line,
+                )
+            )
     return errors
 
 
@@ -221,7 +257,7 @@ def validate_unit(unit: dict[str, Any]) -> list[str]:
         else:
             for token in protected:
                 if str(token) not in str(translation):
-                    errors.append(f"line {line}: protected token missing from translation: {token}")
+                    errors.append(f"line {line}: protected token missing from translation: {visible_escape(str(token))}")
 
     errors.extend(validate_segments(unit))
     return errors
@@ -309,6 +345,8 @@ def default_segment_key(row: dict[str, Any], index: int) -> str:
 def text_nodes_for_row(row: dict[str, Any]) -> list[dict[str, Any]]:
     context = row.get("context") if isinstance(row.get("context"), dict) else {}
     text_nodes = context.get("text_nodes") if isinstance(context, dict) else []
+    if not isinstance(text_nodes, list):
+        return []
     return [node for node in text_nodes if isinstance(node, dict)]
 
 
