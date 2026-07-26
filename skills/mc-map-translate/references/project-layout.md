@@ -40,7 +40,7 @@ For each translation batch:
 8. Write translations only to the matching `translations/parts/workpack_###.jsonl`.
 9. Refresh `translation_progress.md` after each batch.
 
-When a workpack contains `context.identity_coupled`, load all rows in that identity group from the indexes before deciding terminology. Use one translation and keep scanner-provided canonical keys across producers, containers, villager offers, and consumers.
+When a workpack contains `context.identity_coupled`, load all rows sharing its item fingerprint and slot from the indexes before deciding terminology. Use one translation and keep scanner-provided canonical keys across producers, containers, villager offers, and consumers. For `identity_resolution: unresolved`, inspect the exact anchors and record a reviewed identity decision; do not infer a group from wording alone.
 
 Do not load every file under `units/`, `workpacks/`, and `translations/parts/` at the same time.
 Do not send the workpack to an external translation service by default; translate it with Codex using the loaded context.

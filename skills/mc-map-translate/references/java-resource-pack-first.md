@@ -60,7 +60,7 @@ Many Java maps already ship a map-specific resource pack as `resources.zip` besi
 
 `apply-hybrid-keys` is conservative but segment-aware. Single-node hardcoded components use the unit key. Multi-node hardcoded components use `segments[]` and `--multi-text-mode split-nodes` to inject one key per original `text` node, preserving styles and dynamic sibling components. If segment anchors or source text do not match, the unit is skipped and reported.
 Aggregated sign faces also use `segments[]`: translate the full sign first, then fill each segment so the apply step can replace each original sign line/text node with a generated key.
-Item name/lore components marked `identity_coupled` use canonical group keys instead of occurrence keys. This is required when text-component equality participates in trades, predicates, `clear`, rewards, or quest logic.
+Structurally resolved item name/lore components marked `identity_coupled` use canonical keys per full item fingerprint and text slot instead of occurrence keys. Unresolved item identities block export; equal wording alone is never enough to merge. This is required when text-component equality participates in trades, predicates, `clear`, rewards, or quest logic.
 
 `embedded-direct` unit support:
 

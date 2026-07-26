@@ -45,7 +45,11 @@ Treat item `custom_name`, `item_name`, and `lore` as identity-sensitive whenever
 - `clear`, `execute if items`, item predicates, or component/NBT matching consumers;
 - quest-key, currency, unlock, or advancement logic.
 
-The scanner groups equal visible text-node shapes and assigns canonical group keys instead of occurrence keys. This prevents two originally equal items from becoming unequal merely because their translated display text uses different `translate` keys. Do not infer that a shared visible key proves the whole item is identical: item ID, count, custom data, model data, damage, enchantments, and other components still require gameplay-aware QA.
+The scanner must not group by visible wording alone. For parsed NBT and common command item stacks, it builds a canonical full-structure fingerprint from item ID, components/tag data, custom/model data, damage, enchantments, and source name/lore structure. Top-level count and container slot are excluded so differently sized stacks of the same logical item can match. Canonical translation keys are assigned per full item fingerprint plus text slot (`name`, `lore[0]`, and so on).
+
+Roles form a static relationship graph: `producer`, `container`, and `trade_output` can satisfy a structurally equal `trade_input`, `consumer`, or `predicate`. Missing sources block final QA unless an external/runtime source is explicitly reviewed with a reason. Equal text on different fingerprints remains separate and is reported for review.
+
+If the containing item cannot be parsed, preserve an occurrence key and mark the row `identity_resolution: unresolved`. Resolve it through the bundled decisions tool only after comparing the exact non-text evidence and producer/consumer intent. Never repair identity through global string replacement.
 
 ## Do Not Translate
 

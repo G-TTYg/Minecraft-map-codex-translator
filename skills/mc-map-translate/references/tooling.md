@@ -19,7 +19,7 @@ The bundled tools do not call external translation services and do not translate
 - `make-workpacks`: split units into stable JSONL translation batches.
 - `merge-translations`: merge translated JSONL files/directories back into one canonical translations JSONL by stable `id`.
 - `translation-status`: report coverage by unit, source kind, source file, and segment slots.
-- `qa-translations`: write blocking JSON/Markdown QA for incomplete units, unexplained source-equal text, sign-face segment coverage, encoding/contract errors, and identity-coupled key/translation conflicts. `--allow-incomplete` is interim-only.
+- `qa-translations`: write blocking JSON/Markdown QA plus `identity_qa.json` for incomplete units, unexplained source-equal text, sign-face segment coverage, encoding/contract errors, unresolved item identities, canonical-key/translation/structure conflicts, and missing scanned item sources. `--allow-incomplete` is interim-only and does not bypass identity failures.
 - `write-progress-todo`: write or refresh `translation_progress.md`, the persistent workpack TODO list.
 - `prepare-segments`: add `segments[]` translation slots for grouped components with multiple hardcoded `text` nodes.
 - `export-table`: export selected units to UTF-8 TSV.
@@ -31,9 +31,10 @@ The bundled tools do not call external translation services and do not translate
 `scripts/mcmap_java_tools.py`:
 
 - `inspect`: detect Java map/package markers and Bedrock-only markers.
-- `scan`: scan Java resource-pack language JSON, all datapack JSON text components, datapack JSON strings containing text components, `.mcfunction` JSON text components, `execute ... run ...` command chains, command JSON plain strings, quoted command/SNBT JSON text components, plain command messages, storage value strings, whole sign faces, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Sign units retain four-line context and block coordinates when available. Item name/lore rows receive identity-group metadata and canonical keys. Pass `--project-layout` to also create the indexed multi-file layout. `LastOutput` is excluded by default. NBT strings are strict UTF-8. Reports include function-call context, suspicious strings, path-filtered visual text candidates, PNG inventory, and export recommendations.
-- `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy. It selects only complete/reviewed translations by default and reports outcomes by type. If the source already has `resources.zip`, omitting `--resource-pack` is blocked unless `--allow-separate-resource-pack` explicitly documents manual separate-pack delivery. Existing copied packs are merged by default; replacement remains explicit.
-- `apply-direct-text`: copy/extract a Java world or map zip and directly replace translated `embedded-direct` anchors in `.mcfunction`, datapack JSON, `.dat`, and `.mca` files when exact anchors match. It handles `command_plain_span`, plain `command_string_span`, `command_json_path`, datapack JSON `json_string_path`, and parsed NBT strings. Blocks selected rows that contain Unicode replacement characters.
+- `scan`: scan Java resource-pack language JSON, all datapack JSON text components, datapack JSON strings containing text components, `.mcfunction` JSON text components, `execute ... run ...` command chains, command JSON plain strings, quoted command/SNBT JSON text components, plain command messages, storage value strings, whole sign faces, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Sign units retain four-line context and block coordinates when available. Parsed item stacks in NBT, villager offers, containers, `give`, `clear`, `item ... with`, and `execute if/unless items` receive structural fingerprints, roles, text slots, and canonical keys. Unparsed item text remains occurrence-keyed and unresolved. Pass `--project-layout` to also create the indexed multi-file layout. `LastOutput` is excluded by default. NBT strings are strict UTF-8. Reports include function-call context, suspicious strings, path-filtered visual text candidates, PNG inventory, and export recommendations.
+- `resolve-item-identities`: apply a reviewed decisions JSON to unresolved item rows, assign one manual item fingerprint, re-canonicalize keys by name/lore slot, and record external/runtime source approvals with reasons. This is the deterministic alternative to ad hoc key editing.
+- `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy. It runs identity QA before copying, selects only complete/reviewed translations by default, and reports outcomes by type. If the source already has `resources.zip`, omitting `--resource-pack` is blocked unless `--allow-separate-resource-pack` explicitly documents manual separate-pack delivery. Existing copied packs are merged by default; replacement remains explicit.
+- `apply-direct-text`: copy/extract a Java world or map zip and directly replace translated `embedded-direct` anchors in `.mcfunction`, datapack JSON, `.dat`, and `.mca` files when exact anchors match. It runs identity QA before copying, handles `command_plain_span`, plain `command_string_span`, `command_json_path`, datapack JSON `json_string_path`, and parsed NBT strings, and blocks selected rows that contain Unicode replacement characters.
 - `apply-direct-nbt-strings`: legacy alias for `apply-direct-text`.
 - `audit-english`: rescan an exported copied world or map zip for English-looking residual text in player-facing `.mcfunction`, datapack JSON, commands, whole sign faces, text displays, names/lore, and books. Pass `--target-locale`; unrelated/source lang files are excluded by default. High-priority world text is sorted ahead of lang rows, and PNG warnings are path-filtered candidates.
 - `zip-resource-pack`: zip a resource pack directory with the correct root. Pass `--base-resource-pack <resources.zip>` to create a merged full pack from an existing map pack plus generated language files.
@@ -51,6 +52,35 @@ python skills/mc-map-translate/scripts/mcmap_contract.py translation-status <wor
 python skills/mc-map-translate/scripts/mcmap_contract.py qa-translations <workdir> --out <workdir>/qa/interim_translation_qa.json --allow-incomplete
 python skills/mc-map-translate/scripts/mcmap_contract.py write-progress-todo <workdir>
 ```
+
+If `scan_report.json.identity_coupled.unresolved_unit_count` is nonzero, inspect the anchors already listed in generated `identity_review.json`, fill its decisions, and apply it to merged translations before final QA:
+
+```json
+{
+  "namespace": "mcmap",
+  "map_slug": "example",
+  "groups": [
+    {
+      "name": "quest_key",
+      "item_id": "minecraft:tripwire_hook",
+      "unit_ids": ["producer-unit-id", "consumer-unit-id"],
+      "review_reason": "Both anchors have the same model data and custom quest id."
+    }
+  ],
+  "external_sources": [
+    {
+      "unit_ids": ["trade-input-unit-id"],
+      "reason": "The identical item is materialized from the reviewed runtime storage macro."
+    }
+  ]
+}
+```
+
+```bash
+python skills/mc-map-translate/scripts/mcmap_java_tools.py resolve-item-identities <workdir>/translations/translations.jsonl --decisions <workdir>/identity_review.json --out <workdir>/translations/translations.identity-resolved.jsonl --namespace mcmap --map-slug <slug>
+```
+
+Do not create a manual group from wording alone. Compare item ID, custom/model data, damage, enchantments, lore, all non-text components, and producer/consumer intent. An external-source decision is an audited exception, not a general QA bypass.
 
 After the first scan, read `scan_review.md` and `scan_report.json`. Explain the four export modes before spending major translation effort:
 
@@ -204,3 +234,6 @@ The scanner reports but does not automatically localize visual text in PNG textu
 - `workpacks/contextual/*.jsonl`: bounded context-preserving batches.
 - `translations/parts/*.jsonl`: editable staged translation parts.
 - `translations/translations.jsonl`: merged canonical translation file.
+- `identity_review.json`: scanner-generated unresolved item rows plus empty reviewed-decision sections accepted by `resolve-item-identities`.
+- `qa/identity_qa.json`: blocking item fingerprint, slot-key, unresolved identity, and producer/consumer relationship report.
+- `*.identity_resolution_report.json`: audit trail for reviewed manual groups and external-source decisions.

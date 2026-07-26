@@ -15,6 +15,7 @@ import io
 import json
 import re
 import shutil
+import struct
 import sys
 import tempfile
 import zipfile
@@ -24,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-from mcmap_contract import ensure_segments, make_project_files, normalize_key_piece, print_blocking_errors, read_jsonl, require_locale, row_translation_complete, stable_id, translation_item_complete, unit_encoding_errors, utc_now, write_json
+from mcmap_contract import ensure_segments, identity_consistency_report, make_project_files, normalize_key_piece, print_blocking_errors, read_jsonl, require_locale, row_translation_complete, stable_id, translation_item_complete, unit_encoding_errors, utc_now, write_json
 
 
 LANG_PATH_RE = re.compile(r"(?:^|.*[!/])assets/([^/]+)/lang/([a-z]{2,3}_[a-z0-9]{2,8})\.json$")
@@ -87,7 +88,6 @@ SNBT_TEXT_KEYS = {
     "minecraft:lore",
     "minecraft:written_book_content",
     "minecraft:written_book_content.pages",
-    "name",
     "display.name",
     "lore",
     "pages",
@@ -167,6 +167,7 @@ class NbtString:
     value: str
     chunk: dict[str, int] | None = None
     block_pos: dict[str, int] | None = None
+    item_identity: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -175,6 +176,15 @@ class StringLiteralSpan:
     end: int
     quote: str
     decoded: str
+
+
+@dataclass
+class SnbtNode:
+    kind: str
+    value: Any
+    start: int
+    end: int
+    scalar_type: str = ""
 
 
 class NbtReadError(ValueError):
@@ -780,6 +790,429 @@ def encode_snbt_string_literal(value: str, quote: str) -> str:
     return f"'{escaped}'"
 
 
+class SnbtParser:
+    """Small span-preserving SNBT parser for item identity analysis.
+
+    It intentionally covers compounds, lists, typed arrays, quoted strings,
+    and scalar values used by Java commands. Translation apply still relies on
+    the scanner's exact string anchors rather than rewriting this syntax tree.
+    """
+
+    def __init__(self, text: str, start: int = 0):
+        self.text = text
+        self.pos = start
+
+    def skip_ws(self) -> None:
+        while self.pos < len(self.text) and self.text[self.pos].isspace():
+            self.pos += 1
+
+    def parse(self) -> SnbtNode:
+        self.skip_ws()
+        return self.parse_value()
+
+    def parse_value(self) -> SnbtNode:
+        self.skip_ws()
+        if self.pos >= len(self.text):
+            raise ValueError("missing SNBT value")
+        char = self.text[self.pos]
+        if char == "{":
+            return self.parse_compound()
+        if char == "[":
+            return self.parse_list()
+        if char in {"'", '"'}:
+            return self.parse_quoted()
+        return self.parse_bare()
+
+    def parse_quoted(self) -> SnbtNode:
+        start = self.pos
+        quote = self.text[self.pos]
+        self.pos += 1
+        escaped = False
+        while self.pos < len(self.text):
+            char = self.text[self.pos]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                self.pos += 1
+                token = self.text[start:self.pos]
+                if quote == '"':
+                    try:
+                        value = json.loads(token)
+                    except json.JSONDecodeError:
+                        value = token[1:-1]
+                else:
+                    value = decode_snbt_single_quoted(token[1:-1])
+                return SnbtNode("scalar", str(value), start, self.pos, "string")
+            self.pos += 1
+        raise ValueError("unterminated SNBT string")
+
+    def parse_bare(self) -> SnbtNode:
+        start = self.pos
+        while self.pos < len(self.text) and self.text[self.pos] not in ",]}= \t\r\n":
+            self.pos += 1
+        if self.pos == start:
+            raise ValueError("empty SNBT scalar")
+        token = self.text[start:self.pos]
+        lowered = token.lower()
+        numeric = re.fullmatch(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)([bsldf]?)", lowered)
+        if numeric:
+            suffix = numeric.group(2)
+            type_name = {"b": "byte", "s": "short", "l": "long", "f": "float", "d": "double"}.get(
+                suffix, "double" if any(char in numeric.group(1) for char in ".e") else "int"
+            )
+            number: int | float
+            number = float(numeric.group(1)) if type_name in {"float", "double"} else int(numeric.group(1))
+            return SnbtNode("scalar", number, start, self.pos, type_name)
+        if lowered in {"true", "false"}:
+            return SnbtNode("scalar", 1 if lowered == "true" else 0, start, self.pos, "byte")
+        return SnbtNode("scalar", token, start, self.pos, "string")
+
+    def parse_key(self, separator: str) -> str:
+        self.skip_ws()
+        if self.pos >= len(self.text):
+            raise ValueError("missing SNBT key")
+        if self.text[self.pos] in {"'", '"'}:
+            node = self.parse_quoted()
+            return str(node.value)
+        start = self.pos
+        while self.pos < len(self.text) and self.text[self.pos] != separator:
+            if self.text[self.pos] in "{},[] \t\r\n":
+                break
+            self.pos += 1
+        key = self.text[start:self.pos].strip()
+        if not key:
+            raise ValueError("empty SNBT key")
+        return key
+
+    def parse_compound(self) -> SnbtNode:
+        start = self.pos
+        self.pos += 1
+        items: list[tuple[str, SnbtNode]] = []
+        self.skip_ws()
+        while self.pos < len(self.text) and self.text[self.pos] != "}":
+            key = self.parse_key(":")
+            self.skip_ws()
+            if self.pos >= len(self.text) or self.text[self.pos] != ":":
+                raise ValueError("missing ':' after SNBT key")
+            self.pos += 1
+            items.append((key, self.parse_value()))
+            self.skip_ws()
+            if self.pos < len(self.text) and self.text[self.pos] == ",":
+                self.pos += 1
+                self.skip_ws()
+                continue
+            break
+        if self.pos >= len(self.text) or self.text[self.pos] != "}":
+            raise ValueError("unterminated SNBT compound")
+        self.pos += 1
+        return SnbtNode("compound", items, start, self.pos)
+
+    def parse_list(self) -> SnbtNode:
+        start = self.pos
+        self.pos += 1
+        self.skip_ws()
+        array_type = ""
+        if self.pos + 1 < len(self.text) and self.text[self.pos].upper() in {"B", "I", "L"} and self.text[self.pos + 1] == ";":
+            array_type = {"B": "byte_array", "I": "int_array", "L": "long_array"}[self.text[self.pos].upper()]
+            self.pos += 2
+            self.skip_ws()
+        values: list[SnbtNode] = []
+        while self.pos < len(self.text) and self.text[self.pos] != "]":
+            values.append(self.parse_value())
+            self.skip_ws()
+            if self.pos < len(self.text) and self.text[self.pos] == ",":
+                self.pos += 1
+                self.skip_ws()
+                continue
+            break
+        if self.pos >= len(self.text) or self.text[self.pos] != "]":
+            raise ValueError("unterminated SNBT list")
+        self.pos += 1
+        return SnbtNode("list", values, start, self.pos, array_type)
+
+    def parse_assignment_list(self) -> SnbtNode:
+        start = self.pos
+        if self.pos >= len(self.text) or self.text[self.pos] != "[":
+            raise ValueError("missing item component list")
+        self.pos += 1
+        items: list[tuple[str, SnbtNode]] = []
+        self.skip_ws()
+        while self.pos < len(self.text) and self.text[self.pos] != "]":
+            key = self.parse_key("=")
+            self.skip_ws()
+            if self.pos >= len(self.text) or self.text[self.pos] != "=":
+                raise ValueError("missing '=' after item component key")
+            self.pos += 1
+            items.append((key, self.parse_value()))
+            self.skip_ws()
+            if self.pos < len(self.text) and self.text[self.pos] == ",":
+                self.pos += 1
+                self.skip_ws()
+                continue
+            break
+        if self.pos >= len(self.text) or self.text[self.pos] != "]":
+            raise ValueError("unterminated item component list")
+        self.pos += 1
+        return SnbtNode("compound", items, start, self.pos)
+
+
+def snbt_compound_names(node: SnbtNode) -> set[str]:
+    if node.kind != "compound":
+        return set()
+    return {str(name).lower() for name, _child in node.value}
+
+
+def collect_snbt_slot_spans(
+    node: SnbtNode,
+    path: tuple[str | int, ...] = (),
+    out: dict[str, list[tuple[int, int]]] | None = None,
+) -> dict[str, list[tuple[int, int]]]:
+    result = out if out is not None else defaultdict(list)
+    if node.kind == "compound":
+        for name, child in node.value:
+            collect_snbt_slot_spans(child, (*path, str(name)), result)
+    elif node.kind == "list":
+        for index, child in enumerate(node.value):
+            collect_snbt_slot_spans(child, (*path, index), result)
+    elif node.scalar_type == "string":
+        slot = identity_text_slot(path)
+        if slot:
+            result[slot].append((node.start, node.end))
+    return dict(result)
+
+
+def snbt_item_descriptors(
+    node: SnbtNode,
+    *,
+    path: str,
+    default_role: str,
+    confidence: str,
+) -> list[dict[str, Any]]:
+    descriptors: list[dict[str, Any]] = []
+
+    def visit(current: SnbtNode, current_path: str) -> None:
+        if current.kind == "compound":
+            names = snbt_compound_names(current)
+            path_role = identity_role_from_path(current_path)
+            looks_like_item = path_role != "item_component" or (
+                "id" in names and bool(names.intersection({"count", "components", "tag", "slot"}))
+            )
+            if looks_like_item:
+                role = (
+                    default_role
+                    if default_role == "predicate"
+                    else path_role
+                    if path_role != "item_component"
+                    else default_role
+                )
+                metadata = make_item_identity_metadata(
+                    snbt_node_identity_value(current),
+                    item_root=current_path,
+                    role=role,
+                    confidence=confidence,
+                    span=(current.start, current.end),
+                    slot_spans=collect_snbt_slot_spans(current),
+                )
+                if metadata is not None:
+                    descriptors.append(metadata)
+            for name, child in current.value:
+                visit(child, f"{current_path}.{name}")
+        elif current.kind == "list":
+            for index, child in enumerate(current.value):
+                visit(child, f"{current_path}[{index}]")
+
+    visit(node, path)
+    return descriptors
+
+
+def top_level_token_spans(text: str, start: int = 0, end: int | None = None) -> list[tuple[int, int]]:
+    limit = len(text) if end is None else min(end, len(text))
+    spans: list[tuple[int, int]] = []
+    token_start: int | None = None
+    stack: list[str] = []
+    quote = ""
+    escaped = False
+    pairs = {"{": "}", "[": "]", "(": ")"}
+    index = start
+    while index < limit:
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+        elif char in {"'", '"'}:
+            quote = char
+            if token_start is None:
+                token_start = index
+        elif char in pairs:
+            stack.append(pairs[char])
+            if token_start is None:
+                token_start = index
+        elif stack and char == stack[-1]:
+            stack.pop()
+        elif char.isspace() and not stack:
+            if token_start is not None:
+                spans.append((token_start, index))
+                token_start = None
+        elif token_start is None:
+            token_start = index
+        index += 1
+    if token_start is not None:
+        spans.append((token_start, limit))
+    return spans
+
+
+def parse_command_item_stack(
+    text: str,
+    start: int,
+    end: int,
+    *,
+    role: str,
+    root_name: str,
+) -> dict[str, Any] | None:
+    token = text[start:end]
+    match = re.match(r"#?(?:[a-z0-9_.-]+:)?[a-z0-9_./-]+", token, re.I)
+    if not match:
+        return None
+    item_id = match.group(0)
+    cursor = start + match.end()
+    id_node = SnbtNode("scalar", item_id, start, start + match.end(), "string")
+    children: list[tuple[str, SnbtNode]] = [("id", id_node)]
+    try:
+        if cursor < end and text[cursor] == "[":
+            parser = SnbtParser(text, cursor)
+            components = parser.parse_assignment_list()
+            if parser.pos > end:
+                return None
+            children.append(("components", components))
+        elif cursor < end and text[cursor] == "{":
+            parser = SnbtParser(text, cursor)
+            tag = parser.parse()
+            if tag.kind != "compound" or parser.pos > end:
+                return None
+            children.append(("tag", tag))
+    except ValueError:
+        return None
+    root = SnbtNode("compound", children, start, end)
+    return make_item_identity_metadata(
+        snbt_node_identity_value(root),
+        item_root=root_name,
+        role=role,
+        confidence="high",
+        span=(start, end),
+        slot_spans=collect_snbt_slot_spans(root),
+    )
+
+
+def iter_snbt_compounds(text: str) -> Iterable[SnbtNode]:
+    index = 0
+    quote = ""
+    escaped = False
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if char == "{":
+            try:
+                parser = SnbtParser(text, index)
+                node = parser.parse()
+            except ValueError:
+                index += 1
+                continue
+            if node.kind == "compound":
+                yield node
+                index = max(index + 1, node.end)
+                continue
+        index += 1
+
+
+def command_item_identity_descriptors(line: str) -> list[dict[str, Any]]:
+    descriptors: list[dict[str, Any]] = []
+    final_command, command_offset = effective_command_text(line)
+    command_end = command_offset + len(final_command)
+    token_spans = top_level_token_spans(line, command_offset, command_end)
+    tokens = [line[start:end].lower() for start, end in token_spans]
+    word = tokens[0] if tokens else ""
+
+    candidates: list[tuple[int, int, str, str]] = []
+    if word in {"give", "clear"} and len(token_spans) >= 3:
+        role = "producer" if word == "give" else "consumer"
+        candidates.append((*token_spans[2], role, f"command.{word}.item"))
+    elif word == "item" and "with" in tokens:
+        with_index = tokens.index("with")
+        if with_index + 1 < len(token_spans):
+            candidates.append((*token_spans[with_index + 1], "producer", "command.item.with"))
+
+    original_spans = top_level_token_spans(line)
+    original_tokens = [line[start:end].lower().lstrip("/$") for start, end in original_spans]
+    for index in range(len(original_tokens) - 2):
+        if original_tokens[index : index + 3] not in (["execute", "if", "items"], ["execute", "unless", "items"]):
+            continue
+        run_index = next((offset for offset in range(index + 3, len(original_tokens)) if original_tokens[offset] == "run"), len(original_tokens))
+        if run_index > index + 3:
+            predicate_index = run_index - 1
+            candidates.append(
+                (*original_spans[predicate_index], "predicate", "command.execute.items.predicate")
+            )
+
+    for start, end, role, root_name in candidates:
+        metadata = parse_command_item_stack(line, start, end, role=role, root_name=root_name)
+        if metadata is not None:
+            descriptors.append(metadata)
+
+    original_lowered = strip_command_prefix_at(line)[0].lower()
+    predicate_command = bool(
+        re.search(r"^execute\s+(?:if|unless)\s+(?:entity|data|block)\b", original_lowered)
+        and ("nbt=" in original_lowered or "components" in original_lowered or "item" in original_lowered)
+    )
+    command_role = {
+        "give": "producer",
+        "loot": "producer",
+        "item": "producer",
+        "data": "producer",
+        "clear": "consumer",
+    }.get(
+        word,
+        "predicate"
+        if predicate_command
+        else "producer"
+        if word in {"summon", "setblock"}
+        else "item_component",
+    )
+    for node in iter_snbt_compounds(line):
+        descriptors.extend(
+            snbt_item_descriptors(
+                node,
+                path=f"command.{word or 'unknown'}.snbt",
+                default_role=command_role,
+                confidence="medium",
+            )
+        )
+
+    unique: dict[tuple[str, tuple[int, ...]], dict[str, Any]] = {}
+    for descriptor in descriptors:
+        span = tuple(int(value) for value in descriptor.get("identity_item_span", []))
+        key = (str(descriptor.get("identity_item_fingerprint", "")), span)
+        unique[key] = descriptor
+    return list(unique.values())
+
+
 def span_inside_any(start: int, end: int, spans: Iterable[tuple[int, int]]) -> bool:
     return any(outer_start <= start and end <= outer_end for outer_start, outer_end in spans)
 
@@ -794,6 +1227,21 @@ def snbt_key_hint_before(text: str, start: int) -> str:
     matches = list(re.finditer(r"([A-Za-z0-9_:.+-]+)\s*:", window))
     if matches:
         return matches[-1].group(1).lower()
+    return ""
+
+
+def item_text_key_hint_before(text: str, start: int) -> str:
+    window = text[max(0, start - 320) : start]
+    matches = list(
+        re.finditer(
+            r"(?i)(minecraft:(?:custom_name|item_name|lore)|custom_name|item_name|lore)\s*(?:=|:|~)\s*['\"]?\s*$",
+            window,
+        )
+    )
+    if matches:
+        return matches[-1].group(1).lower()
+    if re.search(r"(?is)display\s*:\s*\{[^{}]{0,240}\bname\s*:\s*$", window):
+        return "display.name"
     return ""
 
 
@@ -812,7 +1260,7 @@ def source_kind_from_snbt_key(key: str, fallback: str) -> str:
         return "entity_name"
     if "lore" in lowered:
         return "item_lore"
-    if lowered.endswith("name") or "display.name" in lowered:
+    if "display.name" in lowered:
         return "item_name"
     if "pages" in lowered:
         return "book"
@@ -1042,6 +1490,10 @@ def identity_text_shape(row: dict[str, Any]) -> list[str]:
 
 
 def identity_role_for_row(row: dict[str, Any]) -> str:
+    context = row.get("context") if isinstance(row.get("context"), dict) else {}
+    existing = str(context.get("identity_role", "")).strip()
+    if existing:
+        return existing
     address = row.get("address") if isinstance(row.get("address"), dict) else {}
     path = str(address.get("nbt_path", "")).lower()
     if ".offers.recipes[" in path:
@@ -1049,28 +1501,127 @@ def identity_role_for_row(row: dict[str, Any]) -> str:
             return "trade_input"
         if re.search(r"\.sell(?:\.|$)", path):
             return "trade_output"
-    context = row.get("context") if isinstance(row.get("context"), dict) else {}
     command = str(context.get("identity_command", "")).lower()
     if command in IDENTITY_PRODUCER_COMMANDS:
         return "producer"
+    if command == "execute_if_items":
+        return "predicate"
     if command in IDENTITY_CONSUMER_COMMANDS:
         return "consumer"
     return "item_component"
 
 
+def identity_slot_for_row(row: dict[str, Any], source_path: str = "") -> str:
+    context = row.get("context") if isinstance(row.get("context"), dict) else {}
+    existing = str(context.get("identity_slot", "")).strip()
+    if existing:
+        return existing
+    lowered_path = source_path.lower()
+    if str(row.get("source_kind", "")) == "item_lore":
+        match = re.search(r"lore\[(\d+)\]", lowered_path)
+        return f"lore[{match.group(1)}]" if match else "lore"
+    return "name" if str(row.get("source_kind", "")) == "item_name" else ""
+
+
+def attach_item_identity_metadata(
+    rows: list[dict[str, Any]],
+    metadata: dict[str, Any] | None,
+    *,
+    source_path: str = "",
+) -> None:
+    if not metadata:
+        return
+    for row in rows:
+        if str(row.get("source_kind", "")) not in IDENTITY_COUPLED_SOURCE_KINDS:
+            continue
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        for key, value in metadata.items():
+            if key not in {"identity_slot_spans"}:
+                context[key] = value
+        context["identity_slot"] = identity_slot_for_row(row, source_path)
+        row["context"] = context
+
+
+def row_command_identity_span(row: dict[str, Any]) -> tuple[int, int] | None:
+    address = row.get("address") if isinstance(row.get("address"), dict) else {}
+    for field in ("command_string_span", "command_span", "command_plain_span"):
+        value = address.get(field)
+        if isinstance(value, list) and len(value) == 2 and all(isinstance(item, int) for item in value):
+            return int(value[0]), int(value[1])
+    return None
+
+
+def attach_command_item_identities(rows: list[dict[str, Any]], line: str) -> None:
+    descriptors = command_item_identity_descriptors(line)
+    for row in rows:
+        source_kind = str(row.get("source_kind", ""))
+        span = row_command_identity_span(row)
+        desired_prefixes = (
+            {"lore"}
+            if source_kind == "item_lore"
+            else {"name"}
+            if source_kind == "item_name"
+            else {"name", "lore"}
+        )
+        matches: list[tuple[int, dict[str, Any], str]] = []
+        for descriptor in descriptors:
+            item_span = descriptor.get("identity_item_span", [])
+            if not isinstance(item_span, list) or len(item_span) != 2:
+                continue
+            item_start, item_end = int(item_span[0]), int(item_span[1])
+            if span is not None and not (item_start <= span[0] and span[1] <= item_end):
+                continue
+            slot_spans = descriptor.get("identity_slot_spans", {})
+            if not isinstance(slot_spans, dict):
+                continue
+            for slot, values in slot_spans.items():
+                if not any(str(slot).startswith(prefix) for prefix in desired_prefixes):
+                    continue
+                if span is not None and not any(
+                    isinstance(value, list)
+                    and len(value) == 2
+                    and int(value[0]) < span[1]
+                    and span[0] < int(value[1])
+                    for value in values
+                ):
+                    continue
+                matches.append((item_end - item_start, descriptor, str(slot)))
+        if not matches:
+            continue
+        _size, metadata, slot = min(matches, key=lambda item: item[0])
+        copied = dict(metadata)
+        copied.pop("identity_slot_spans", None)
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        context.update(copied)
+        context["identity_slot"] = slot
+        row["context"] = context
+        row["source_kind"] = "item_lore" if slot.startswith("lore") else "item_name"
+
+
 def canonicalize_identity_keys(rows: list[dict[str, Any]], namespace: str, map_slug: str) -> dict[str, Any]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    unresolved: list[dict[str, Any]] = []
     for row in rows:
         source_kind = str(row.get("source_kind", ""))
         if source_kind not in IDENTITY_COUPLED_SOURCE_KINDS:
             continue
         shape = identity_text_shape(row)
-        group_id = stable_id("identity-coupled", source_kind, json.dumps(shape, ensure_ascii=False))
         context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        fingerprint = str(context.get("identity_item_fingerprint", "")).strip()
+        slot = identity_slot_for_row(row, str(row.get("address", {}).get("nbt_path", "")))
+        resolution = str(context.get("identity_resolution", "")).strip()
+        if fingerprint and slot and resolution in {"structural", "manual"}:
+            group_id = stable_id("identity-slot-v2", fingerprint, slot)
+        else:
+            group_id = stable_id("identity-unresolved-v2", str(row.get("id", "")))
+            resolution = "unresolved"
+            unresolved.append(row)
         context["identity_coupled"] = True
         context["identity_group"] = group_id
         context["identity_role"] = identity_role_for_row(row)
         context["identity_text_shape"] = shape
+        context["identity_slot"] = slot
+        context["identity_resolution"] = resolution
         row["context"] = context
         groups[group_id].append(row)
 
@@ -1080,7 +1631,11 @@ def canonicalize_identity_keys(rows: list[dict[str, Any]], namespace: str, map_s
             [normalize_key_piece(namespace), normalize_key_piece(map_slug), "identity", source_kind, group_id]
         )
         for row in group_rows:
-            if "hybrid-key-injection" in row.get("mode_support", []):
+            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            if (
+                context.get("identity_resolution") in {"structural", "manual"}
+                and "hybrid-key-injection" in row.get("mode_support", [])
+            ):
                 row["translation_key"] = canonical_key
                 for segment in row_segments(row):
                     index = int(segment.get("index", 0))
@@ -1091,7 +1646,52 @@ def canonicalize_identity_keys(rows: list[dict[str, Any]], namespace: str, map_s
         "group_count": len(groups),
         "repeated_group_count": sum(1 for group in groups.values() if len(group) > 1),
         "max_group_size": max((len(group) for group in groups.values()), default=0),
+        "structural_group_count": sum(
+            1
+            for group in groups.values()
+            if group
+            and isinstance(group[0].get("context"), dict)
+            and group[0]["context"].get("identity_resolution") in {"structural", "manual"}
+        ),
+        "unresolved_unit_count": len(unresolved),
     }
+
+
+def write_identity_review_template(
+    path: Path,
+    rows: list[dict[str, Any]],
+    *,
+    namespace: str,
+    map_slug: str,
+) -> None:
+    unresolved: list[dict[str, Any]] = []
+    for row in rows:
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        if not context.get("identity_coupled") or context.get("identity_resolution") != "unresolved":
+            continue
+        unresolved.append(
+            {
+                "unit_id": str(row.get("id", "")),
+                "source_kind": str(row.get("source_kind", "")),
+                "raw": str(row.get("raw", "")),
+                "source_file": str(row.get("source_file", "")),
+                "address": row.get("address", {}),
+                "inferred_role": str(context.get("identity_role", "item_component")),
+            }
+        )
+    template = {
+        "schema": "mc-map-identity-decisions.v1",
+        "namespace": namespace,
+        "map_slug": map_slug,
+        "unresolved_units": unresolved,
+        "groups": [],
+        "external_sources": [],
+        "instructions": (
+            "Review exact anchors and non-text item evidence. Fill groups only for one logical item; "
+            "do not group by visible wording alone. External sources require a concrete runtime-source reason."
+        ),
+    }
+    write_json(path, template)
 
 
 def scan_lang_file(entry: Entry, source_locale: str) -> list[dict[str, Any]]:
@@ -1518,11 +2118,6 @@ def extract_text_components(
 
 
 def infer_command_source_kind(line: str, fallback: str = "function") -> str:
-    full_lowered = line.lower()
-    if "custom_name" in full_lowered or "minecraft:item_name" in full_lowered:
-        return "item_name"
-    if "lore" in full_lowered:
-        return "item_lore"
     stripped = normalize_command_line(line)
     execute_tail = execute_run_tail(stripped)
     if execute_tail:
@@ -1542,10 +2137,10 @@ def infer_command_source_kind(line: str, fallback: str = "function") -> str:
         return "scoreboard"
     if lowered.startswith("team "):
         return "team"
+    if lowered.startswith("summon text_display "):
+        return "text_display"
     if "customname" in lowered:
         return "entity_name"
-    if "display" in lowered and "name" in lowered:
-        return "item_name"
     return fallback
 
 
@@ -1582,7 +2177,7 @@ def plain_snbt_string_units(
     for literal in iter_quoted_string_literals(line):
         if span_inside_any(literal.start, literal.end, occupied):
             continue
-        key_hint = snbt_key_hint_before(line, literal.start)
+        key_hint = item_text_key_hint_before(line, literal.start) or snbt_key_hint_before(line, literal.start)
         if not key_hint or not snbt_key_is_player_text(key_hint):
             continue
         raw = literal.decoded
@@ -1727,8 +2322,12 @@ def scan_command_line(
             occupied_spans=[span for span in occupied_spans if len(span) == 2],
         )
     )
-    lowered_line = normalize_command_line(line).lower()
-    identity_command = "execute_if_items" if re.search(r"\bexecute\s+if\s+items\b", lowered_line) else command_word(line)
+    lowered_line = strip_command_prefix_at(line)[0].lower()
+    identity_command = (
+        "execute_if_items"
+        if re.search(r"\bexecute\s+(?:if|unless)\s+items\b", lowered_line)
+        else command_word(line)
+    )
     if identity_command:
         for row in units:
             if str(row.get("source_kind", "")) not in IDENTITY_COUPLED_SOURCE_KINDS:
@@ -1736,6 +2335,22 @@ def scan_command_line(
             context = row.get("context") if isinstance(row.get("context"), dict) else {}
             context["identity_command"] = identity_command
             row["context"] = context
+    attach_command_item_identities(units, line)
+    for row in units:
+        if str(row.get("source_kind", "")) in IDENTITY_COUPLED_SOURCE_KINDS:
+            continue
+        span = row_command_identity_span(row)
+        if span is None:
+            continue
+        item_key_hint = item_text_key_hint_before(line, span[0])
+        if not item_key_hint:
+            continue
+        row["source_kind"] = source_kind_from_snbt_key(item_key_hint, str(row.get("source_kind", "function")))
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        if identity_command:
+            context["identity_command"] = identity_command
+        context["identity_parse_warning"] = "item text key was found, but the containing item structure was not parsed"
+        row["context"] = context
     return units
 
 
@@ -1837,11 +2452,16 @@ def json_path_is_plain_text_candidate(path: str) -> bool:
     parts = json_path_name_parts(path)
     if not parts:
         return False
+    if "score" in parts and parts[-1] in {"name", "objective"}:
+        return False
     return any(part in JSON_TEXT_PATH_HINTS for part in parts)
 
 
 def source_kind_from_json_path(path: str, fallback: str = "datapack_json") -> str:
-    lowered = ".".join(json_path_name_parts(path))
+    parts = json_path_name_parts(path)
+    lowered = ".".join(parts)
+    if "score" in parts:
+        return "scoreboard"
     if "lore" in lowered:
         return "item_lore"
     if "pages" in lowered or ".page" in lowered:
@@ -2009,6 +2629,212 @@ def nbt_integer_value(tag: NbtTag) -> int | None:
     return int.from_bytes(data, "big", signed=True)
 
 
+NBT_SCALAR_TYPES = {
+    1: "byte",
+    2: "short",
+    3: "int",
+    4: "long",
+    5: "float",
+    6: "double",
+    7: "byte_array",
+    8: "string",
+    11: "int_array",
+    12: "long_array",
+}
+
+
+def nbt_tag_identity_value(tag: NbtTag) -> Any:
+    if tag.tag_type == 10:
+        return {"$compound": [[name, nbt_tag_identity_value(child)] for name, child in tag.value]}
+    if tag.tag_type == 9:
+        _child_type, items = tag.value
+        return {"$list": [nbt_tag_identity_value(child) for child in items]}
+    if tag.tag_type in {1, 2, 3, 4}:
+        return {"$type": NBT_SCALAR_TYPES[tag.tag_type], "value": nbt_integer_value(tag)}
+    if tag.tag_type == 5:
+        return {"$type": "float", "value": struct.unpack(">f", bytes(tag.value))[0]}
+    if tag.tag_type == 6:
+        return {"$type": "double", "value": struct.unpack(">d", bytes(tag.value))[0]}
+    if tag.tag_type == 8:
+        return {"$type": "string", "value": str(tag.value)}
+    if tag.tag_type in {7, 11, 12}:
+        width = {7: 1, 11: 4, 12: 8}[tag.tag_type]
+        data = bytes(tag.value)
+        values = [int.from_bytes(data[index : index + width], "big", signed=True) for index in range(0, len(data), width)]
+        return {"$type": NBT_SCALAR_TYPES[tag.tag_type], "value": values}
+    return {"$type": f"tag_{tag.tag_type}", "value": None}
+
+
+def snbt_node_identity_value(node: SnbtNode) -> Any:
+    if node.kind == "compound":
+        return {"$compound": [[name, snbt_node_identity_value(child)] for name, child in node.value]}
+    if node.kind == "list":
+        if node.scalar_type:
+            return {
+                "$type": node.scalar_type,
+                "value": [child.value for child in node.value],
+            }
+        value = {"$list": [snbt_node_identity_value(child) for child in node.value]}
+        return value
+    return {"$type": node.scalar_type or "string", "value": node.value}
+
+
+def identity_compound_items(value: Any) -> list[tuple[str, Any]]:
+    if not isinstance(value, dict) or not isinstance(value.get("$compound"), list):
+        return []
+    return [(str(item[0]), item[1]) for item in value["$compound"] if isinstance(item, list) and len(item) == 2]
+
+
+def identity_scalar_string(value: Any) -> str:
+    if isinstance(value, dict) and value.get("$type") == "string":
+        return str(value.get("value", ""))
+    return ""
+
+
+def identity_text_slot(path: tuple[str | int, ...]) -> str:
+    names = [str(part).lower() for part in path if isinstance(part, str)]
+    joined = ".".join(names)
+    if any(name.rsplit(":", 1)[-1] in {"custom_name", "item_name"} for name in names):
+        return "name"
+    if "display.name" in joined:
+        return "name"
+    lore_at = next((index for index, name in enumerate(names) if name.rsplit(":", 1)[-1] == "lore"), -1)
+    if lore_at >= 0:
+        path_index = next((part for part in path[lore_at + 1 :] if isinstance(part, int)), None)
+        return f"lore[{path_index}]" if path_index is not None else "lore"
+    return ""
+
+
+def canonicalize_identity_value(
+    value: Any,
+    path: tuple[str | int, ...] = (),
+    *,
+    redact_text: bool = False,
+    top_level: bool = True,
+) -> Any:
+    compound_items = identity_compound_items(value)
+    if compound_items:
+        normalized: list[list[Any]] = []
+        for name, child in compound_items:
+            lowered = name.lower()
+            if top_level and lowered in {"count", "slot"}:
+                continue
+            normalized.append(
+                [
+                    name,
+                    canonicalize_identity_value(child, (*path, name), redact_text=redact_text, top_level=False),
+                ]
+            )
+        normalized.sort(key=lambda item: item[0])
+        return {"$compound": normalized}
+    if isinstance(value, dict) and isinstance(value.get("$list"), list):
+        result = {
+            "$list": [
+                canonicalize_identity_value(child, (*path, index), redact_text=redact_text, top_level=False)
+                for index, child in enumerate(value["$list"])
+            ]
+        }
+        if value.get("$array_type"):
+            result["$array_type"] = value["$array_type"]
+        return result
+    slot = identity_text_slot(path)
+    if redact_text and slot and isinstance(value, dict) and value.get("$type") == "string":
+        return {"$type": "identity_text", "slot": slot}
+    return value
+
+
+def collect_identity_slot_values(value: Any, path: tuple[str | int, ...] = ()) -> dict[str, list[str]]:
+    slots: dict[str, list[str]] = defaultdict(list)
+
+    def visit(current: Any, current_path: tuple[str | int, ...]) -> None:
+        compound_items = identity_compound_items(current)
+        if compound_items:
+            for name, child in compound_items:
+                visit(child, (*current_path, name))
+            return
+        if isinstance(current, dict) and isinstance(current.get("$list"), list):
+            for index, child in enumerate(current["$list"]):
+                visit(child, (*current_path, index))
+            return
+        slot = identity_text_slot(current_path)
+        if slot and isinstance(current, dict) and current.get("$type") == "string":
+            slots[slot].append(str(current.get("value", "")))
+
+    visit(value, path)
+    return dict(slots)
+
+
+def identity_role_from_path(path: str) -> str:
+    lowered = path.lower()
+    if re.search(r"\.offers\.recipes\[\d+\]\.(?:buy|buyb)(?:\.|$)", lowered):
+        return "trade_input"
+    if re.search(r"\.offers\.recipes\[\d+\]\.sell(?:\.|$)", lowered):
+        return "trade_output"
+    if re.search(r"\.(?:items|inventory|enderitems)\[\d+\](?:\.|$)", lowered):
+        return "container"
+    return "item_component"
+
+
+def make_item_identity_metadata(
+    value: Any,
+    *,
+    item_root: str,
+    role: str,
+    confidence: str,
+    span: tuple[int, int] | None = None,
+    slot_spans: dict[str, list[tuple[int, int]]] | None = None,
+) -> dict[str, Any] | None:
+    item_id = ""
+    for name, child in identity_compound_items(value):
+        if name.lower() == "id":
+            item_id = identity_scalar_string(child)
+            break
+    if not item_id:
+        return None
+    canonical = canonicalize_identity_value(value)
+    non_text = canonicalize_identity_value(value, redact_text=True)
+    slot_values = collect_identity_slot_values(value)
+    if not slot_values:
+        return None
+    canonical_json = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    non_text_json = json.dumps(non_text, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    metadata: dict[str, Any] = {
+        "identity_item_id": item_id,
+        "identity_item_fingerprint": stable_id("item-structure-v2", canonical_json),
+        "identity_non_text_fingerprint": stable_id("item-non-text-v2", non_text_json),
+        "identity_item_root": item_root,
+        "identity_role": role,
+        "identity_resolution": "structural",
+        "identity_confidence": confidence,
+        "identity_slots": sorted(slot_values),
+    }
+    if span is not None:
+        metadata["identity_item_span"] = [span[0], span[1]]
+    if slot_spans:
+        metadata["identity_slot_spans"] = {
+            slot: [[start, end] for start, end in spans] for slot, spans in sorted(slot_spans.items())
+        }
+    return metadata
+
+
+def nbt_item_identity_metadata(tag: NbtTag, path: str) -> dict[str, Any] | None:
+    if tag.tag_type != 10:
+        return None
+    names = {name.lower() for name, _child in tag.value}
+    role = identity_role_from_path(path)
+    looks_like_item = role != "item_component" or (
+        "id" in names and bool(names.intersection({"count", "components", "tag", "slot"}))
+    )
+    if not looks_like_item:
+        return None
+    return make_item_identity_metadata(
+        nbt_tag_identity_value(tag),
+        item_root=path,
+        role=role,
+        confidence="high",
+    )
+
+
 def compound_block_pos(tag: NbtTag) -> dict[str, int] | None:
     if tag.tag_type != 10:
         return None
@@ -2026,20 +2852,44 @@ def collect_nbt_strings(
     *,
     chunk: dict[str, int] | None,
     block_pos: dict[str, int] | None = None,
+    item_identity: dict[str, Any] | None = None,
 ) -> None:
     if tag.tag_type == 8:
-        out.append(NbtString(path=path, value=str(tag.value), chunk=chunk, block_pos=block_pos))
+        out.append(
+            NbtString(
+                path=path,
+                value=str(tag.value),
+                chunk=chunk,
+                block_pos=block_pos,
+                item_identity=item_identity,
+            )
+        )
         return
     if tag.tag_type == 9:
         _child_type, items = tag.value
         for index, child in enumerate(items):
-            collect_nbt_strings(child, f"{path}[{index}]", out, chunk=chunk, block_pos=block_pos)
+            collect_nbt_strings(
+                child,
+                f"{path}[{index}]",
+                out,
+                chunk=chunk,
+                block_pos=block_pos,
+                item_identity=item_identity,
+            )
         return
     if tag.tag_type == 10:
         current_pos = compound_block_pos(tag) or block_pos
+        current_item_identity = nbt_item_identity_metadata(tag, path) or item_identity
         for name, child in tag.value:
             child_path = f"{path}.{name}" if path else name
-            collect_nbt_strings(child, child_path, out, chunk=chunk, block_pos=current_pos)
+            collect_nbt_strings(
+                child,
+                child_path,
+                out,
+                chunk=chunk,
+                block_pos=current_pos,
+                item_identity=current_item_identity,
+            )
 
 
 def scan_nbt_strings(data: bytes, chunk: dict[str, int] | None = None) -> list[NbtString]:
@@ -2337,6 +3187,7 @@ def scan_nbt_value(
                 confidence="medium",
             )
         )
+        attach_item_identity_metadata(units, item.item_identity, source_path=item.path)
         return units
 
     stripped = value.strip()
@@ -2359,6 +3210,7 @@ def scan_nbt_value(
                     notes="NBT string containing JSON text component.",
                 )
             )
+            attach_item_identity_metadata(units, item.item_identity, source_path=item.path)
             return units
 
     if nbt_path_is_plain_text_candidate(item.path) and is_player_text(value):
@@ -2377,6 +3229,7 @@ def scan_nbt_value(
                 notes="Plain NBT string from a player-facing path hint; direct copied-world patching is required.",
             )
         )
+    attach_item_identity_metadata(units, item.item_identity, source_path=item.path)
     return units
 
 
@@ -2631,6 +3484,7 @@ def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, A
         f"- Aggregated sign groups: {report.get('discovery_counters', {}).get('aggregated_sign_groups', 0)}",
         f"- Sign faces without player text: {report.get('discovery_counters', {}).get('sign_faces_without_player_text', 0)}",
         f"- Identity-coupled units/groups: {report.get('identity_coupled', {}).get('unit_count', 0)}/{report.get('identity_coupled', {}).get('group_count', 0)}",
+        f"- Structurally resolved/unresolved identity groups or units: {report.get('identity_coupled', {}).get('structural_group_count', 0)}/{report.get('identity_coupled', {}).get('unresolved_unit_count', 0)}",
         f"- Macro function lines: {report.get('discovery_counters', {}).get('macro_function_lines', 0)}",
         f"- Function calls: {report.get('function_call_count', 0)}",
         f"- Suspicious text hints: {report.get('suspicious_text_hint_count', 0)}",
@@ -2812,6 +3666,13 @@ def scan_source(args: argparse.Namespace) -> int:
     identity_summary = canonicalize_identity_keys(units, namespace, map_slug)
     unit_path = out / "translation_units.jsonl"
     write_jsonl(unit_path, units)
+    identity_review_path = out / "identity_review.json"
+    write_identity_review_template(
+        identity_review_path,
+        units,
+        namespace=namespace,
+        map_slug=map_slug,
+    )
     encoding_warnings: list[str] = [
         warning
         for warning in warnings
@@ -2866,6 +3727,7 @@ def scan_source(args: argparse.Namespace) -> int:
         "map_resource_packs": map_resource_packs,
         "map_resource_pack_count": len(map_resource_packs),
         "identity_coupled": identity_summary,
+        "identity_review_file": str(identity_review_path),
         "direct_only_unit_count": sum(
             1
             for row in units
@@ -4879,7 +5741,19 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
         else:
             out.unlink()
 
-    rows, selection_skipped = select_hybrid_rows(read_jsonl(translations), args)
+    all_rows = read_jsonl(translations)
+    identity_qa = identity_consistency_report(all_rows)
+    if identity_qa["blocking_count"]:
+        print_blocking_errors(
+            [
+                f"{identity_qa['conflict_count']} identity conflict(s)",
+                f"{identity_qa['unresolved_count']} unresolved identity unit(s)",
+                f"{identity_qa['relationship_gap_count']} identity relationship gap(s)",
+            ],
+            "hybrid apply blocked by identity QA",
+        )
+        return 1
+    rows, selection_skipped = select_hybrid_rows(all_rows, args)
     encoding_errors: list[str] = []
     for row in rows:
         encoding_errors.extend(unit_encoding_errors(row))
@@ -4954,6 +5828,7 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
         "resource_pack_merge": resource_pack_merge_report,
         "source_map_resource_packs": existing_map_resource_packs,
         "separate_resource_pack_explicit": bool(args.allow_separate_resource_pack),
+        "identity_qa": identity_qa,
     }
     write_json(report_path, report)
 
@@ -4983,7 +5858,19 @@ def apply_direct_nbt_strings(args: argparse.Namespace) -> int:
         else:
             out.unlink()
 
-    rows, selection_skipped = select_direct_text_rows(read_jsonl(translations), args)
+    all_rows = read_jsonl(translations)
+    identity_qa = identity_consistency_report(all_rows)
+    if identity_qa["blocking_count"]:
+        print_blocking_errors(
+            [
+                f"{identity_qa['conflict_count']} identity conflict(s)",
+                f"{identity_qa['unresolved_count']} unresolved identity unit(s)",
+                f"{identity_qa['relationship_gap_count']} identity relationship gap(s)",
+            ],
+            "direct text apply blocked by identity QA",
+        )
+        return 1
+    rows, selection_skipped = select_direct_text_rows(all_rows, args)
     encoding_errors: list[str] = []
     for row in rows:
         encoding_errors.extend(unit_encoding_errors(row))
@@ -5037,6 +5924,7 @@ def apply_direct_nbt_strings(args: argparse.Namespace) -> int:
         "skipped": dict(sorted(state.skipped.items())),
         "skipped_samples": state.skipped_samples,
         "risk": "embedded-direct plain text replacement in copied .mcfunction, datapack JSON, .dat, or .mca anchors; source text must match exactly and original source is never edited",
+        "identity_qa": identity_qa,
     }
     write_json(report_path, report)
 
@@ -5226,6 +6114,119 @@ def write_delivery(args: argparse.Namespace) -> int:
     return 0
 
 
+def resolve_item_identities(args: argparse.Namespace) -> int:
+    translations = Path(args.translations).resolve()
+    decisions_path = Path(args.decisions).resolve()
+    out = Path(args.out).resolve()
+    rows = read_jsonl(translations)
+    decisions = json.loads(decisions_path.read_text(encoding="utf-8"))
+    if not isinstance(decisions, dict):
+        raise ValueError("identity decisions must be a JSON object")
+    row_by_id = {str(row.get("id", "")): row for row in rows}
+    touched: set[str] = set()
+    errors: list[str] = []
+
+    groups = decisions.get("groups", [])
+    if not isinstance(groups, list):
+        raise ValueError("identity decisions groups must be a list")
+    for index, decision in enumerate(groups):
+        if not isinstance(decision, dict):
+            errors.append(f"groups[{index}] must be an object")
+            continue
+        name = str(decision.get("name", "")).strip()
+        reason = str(decision.get("review_reason", "")).strip()
+        unit_ids = decision.get("unit_ids", [])
+        if not name or not reason or not isinstance(unit_ids, list) or not unit_ids:
+            errors.append(f"groups[{index}] requires name, review_reason, and non-empty unit_ids")
+            continue
+        fingerprint = stable_id(
+            "manual-item-identity-v2",
+            normalize_key_piece(name),
+            str(decision.get("item_id", "")),
+        )
+        role_overrides = decision.get("roles", {})
+        if not isinstance(role_overrides, dict):
+            errors.append(f"groups[{index}].roles must be an object keyed by unit id")
+            role_overrides = {}
+        for raw_unit_id in unit_ids:
+            unit_id = str(raw_unit_id)
+            row = row_by_id.get(unit_id)
+            if row is None:
+                errors.append(f"groups[{index}] references unknown unit id: {unit_id}")
+                continue
+            if unit_id in touched:
+                errors.append(f"unit id appears in more than one manual identity group: {unit_id}")
+                continue
+            if str(row.get("source_kind", "")) not in IDENTITY_COUPLED_SOURCE_KINDS:
+                errors.append(f"groups[{index}] unit is not item_name/item_lore: {unit_id}")
+                continue
+            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            context["identity_item_fingerprint"] = fingerprint
+            context["identity_non_text_fingerprint"] = fingerprint
+            context["identity_resolution"] = "manual"
+            context["identity_review_reason"] = reason
+            context["identity_manual_name"] = name
+            if decision.get("item_id"):
+                context["identity_item_id"] = str(decision["item_id"])
+            if unit_id in role_overrides:
+                context["identity_role"] = str(role_overrides[unit_id])
+            context["identity_slot"] = identity_slot_for_row(
+                row, str(row.get("address", {}).get("nbt_path", ""))
+            )
+            row["context"] = context
+            touched.add(unit_id)
+
+    external_sources = decisions.get("external_sources", [])
+    if not isinstance(external_sources, list):
+        raise ValueError("identity decisions external_sources must be a list")
+    approved_external = 0
+    for index, decision in enumerate(external_sources):
+        if not isinstance(decision, dict):
+            errors.append(f"external_sources[{index}] must be an object")
+            continue
+        reason = str(decision.get("reason", "")).strip()
+        unit_ids = decision.get("unit_ids", [])
+        if not reason or not isinstance(unit_ids, list) or not unit_ids:
+            errors.append(f"external_sources[{index}] requires reason and non-empty unit_ids")
+            continue
+        for raw_unit_id in unit_ids:
+            unit_id = str(raw_unit_id)
+            row = row_by_id.get(unit_id)
+            if row is None:
+                errors.append(f"external_sources[{index}] references unknown unit id: {unit_id}")
+                continue
+            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            context["identity_external_source"] = True
+            context["identity_external_source_reason"] = reason
+            row["context"] = context
+            approved_external += 1
+
+    if errors:
+        raise ValueError("identity decisions rejected:\n- " + "\n- ".join(errors))
+
+    namespace = normalize_key_piece(str(args.namespace or decisions.get("namespace") or "mcmap"))
+    map_slug = normalize_key_piece(str(args.map_slug or decisions.get("map_slug") or "map"))
+    summary = canonicalize_identity_keys(rows, namespace, map_slug)
+    write_jsonl(out, rows)
+    report = {
+        "schema": "mc-map-identity-resolution-report.v1",
+        "created_at": utc_now(),
+        "source": str(translations),
+        "decisions": str(decisions_path),
+        "output": str(out),
+        "manual_unit_count": len(touched),
+        "external_source_approval_count": approved_external,
+        "identity_summary": summary,
+    }
+    report_path = Path(args.report).resolve() if args.report else out.with_suffix(out.suffix + ".identity_resolution_report.json")
+    write_json(report_path, report)
+    print(f"resolved_translations: {out}")
+    print(f"identity_resolution_report: {report_path}")
+    print(f"manual_units: {len(touched)}")
+    print(f"unresolved_units: {summary['unresolved_unit_count']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Java Minecraft map localization tools")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -5249,6 +6250,18 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--max-workpack-units", type=int, default=120, help="maximum units per contextual workpack when --project-layout is used")
     scan.add_argument("--no-prepare-segments", action="store_true", help="do not scaffold segments[] when --project-layout is used")
     scan.set_defaults(func=scan_source)
+
+    resolve_identity = subparsers.add_parser(
+        "resolve-item-identities",
+        help="apply reviewed manual item-identity groups and external-source decisions",
+    )
+    resolve_identity.add_argument("translations", help="translation JSONL or project containing identity-coupled rows")
+    resolve_identity.add_argument("--decisions", required=True, help="reviewed identity decisions JSON")
+    resolve_identity.add_argument("--out", required=True, help="output JSONL with canonical manual identity keys")
+    resolve_identity.add_argument("--namespace", default="", help="generated translation-key namespace")
+    resolve_identity.add_argument("--map-slug", default="", help="stable map slug for generated keys")
+    resolve_identity.add_argument("--report", default="", help="custom identity resolution report path")
+    resolve_identity.set_defaults(func=resolve_item_identities)
 
     apply = subparsers.add_parser("apply-hybrid-keys", help="patch a copied Java world so hardcoded JSON text components use translation keys")
     apply.add_argument("source", help="original Java world directory or map zip")

@@ -529,6 +529,8 @@ def iter_pack_entries(
 
 def identity_consistency_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    items: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    unresolved: list[dict[str, Any]] = []
     for row in rows:
         context = row.get("context") if isinstance(row.get("context"), dict) else {}
         if not context.get("identity_coupled"):
@@ -536,6 +538,23 @@ def identity_consistency_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
         group_id = str(context.get("identity_group", "")).strip()
         if group_id:
             groups[group_id].append(row)
+        fingerprint = str(context.get("identity_item_fingerprint", "")).strip()
+        resolution = str(context.get("identity_resolution", "")).strip()
+        manual_reason = str(context.get("identity_review_reason", "")).strip()
+        if resolution == "manual" and not manual_reason:
+            resolution = "unresolved"
+        if resolution not in {"structural", "manual"} or not fingerprint:
+            unresolved.append(
+                {
+                    "unit_id": str(row.get("id", "")),
+                    "source_kind": str(row.get("source_kind", "")),
+                    "source_file": str(row.get("source_file", "")),
+                    "raw": str(row.get("raw", "")),
+                    "reason": "item identity was not structurally parsed or manually resolved with a review reason",
+                }
+            )
+        else:
+            items[fingerprint].append(row)
 
     conflicts: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
@@ -543,9 +562,19 @@ def identity_consistency_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
         keys_by_slot: dict[str, set[str]] = defaultdict(set)
         translations_by_slot: dict[str, set[str]] = defaultdict(set)
         roles: Counter[str] = Counter()
+        fingerprints: set[str] = set()
+        identity_slots: set[str] = set()
+        resolutions: Counter[str] = Counter()
         for row in group_rows:
             context = row.get("context") if isinstance(row.get("context"), dict) else {}
             roles[str(context.get("identity_role", "item_component"))] += 1
+            fingerprint = str(context.get("identity_item_fingerprint", "")).strip()
+            if fingerprint:
+                fingerprints.add(fingerprint)
+            identity_slot = str(context.get("identity_slot", "")).strip()
+            if identity_slot:
+                identity_slots.add(identity_slot)
+            resolutions[str(context.get("identity_resolution", "unresolved"))] += 1
             key = str(row.get("translation_key", "")).strip()
             if key and "hybrid-key-injection" in row.get("mode_support", []):
                 keys_by_slot["unit"].add(key)
@@ -565,13 +594,21 @@ def identity_consistency_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
         translation_conflicts = {
             slot: sorted(values) for slot, values in translations_by_slot.items() if len(values) > 1
         }
-        if key_conflicts or translation_conflicts:
+        structural_conflicts: list[str] = []
+        if len(fingerprints) > 1:
+            structural_conflicts.append("identity group contains multiple item structure fingerprints")
+        if len(identity_slots) > 1:
+            structural_conflicts.append("identity group contains multiple text slots")
+        if key_conflicts or translation_conflicts or structural_conflicts:
             conflicts.append(
                 {
                     "identity_group": group_id,
                     "unit_ids": [str(row.get("id", "")) for row in group_rows],
                     "key_conflicts": key_conflicts,
                     "translation_conflicts": translation_conflicts,
+                    "structural_conflicts": structural_conflicts,
+                    "item_fingerprints": sorted(fingerprints),
+                    "identity_slots": sorted(identity_slots),
                 }
             )
         summaries.append(
@@ -581,19 +618,109 @@ def identity_consistency_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "source_kind": str(group_rows[0].get("source_kind", "")),
                 "raw": str(group_rows[0].get("raw", "")),
                 "roles": dict(sorted(roles.items())),
+                "resolutions": dict(sorted(resolutions.items())),
+                "item_fingerprints": sorted(fingerprints),
+                "identity_slots": sorted(identity_slots),
                 "canonical_keys": {slot: sorted(values) for slot, values in sorted(keys_by_slot.items())},
             }
         )
 
+    source_roles = {"producer", "container", "trade_output"}
+    required_source_roles = {"trade_input", "consumer", "predicate"}
+    relationship_gaps: list[dict[str, Any]] = []
+    item_summaries: list[dict[str, Any]] = []
+    same_text_items: dict[tuple[str, tuple[str, ...]], set[str]] = defaultdict(set)
+    for fingerprint, item_rows in sorted(items.items()):
+        roles: Counter[str] = Counter()
+        item_ids: set[str] = set()
+        source_files: set[str] = set()
+        external_source = False
+        external_reasons: set[str] = set()
+        for row in item_rows:
+            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            role = str(context.get("identity_role", "item_component"))
+            roles[role] += 1
+            item_id = str(context.get("identity_item_id", "")).strip()
+            if item_id:
+                item_ids.add(item_id)
+            source_files.add(str(row.get("source_file", "")))
+            if context.get("identity_external_source") and str(context.get("identity_external_source_reason", "")).strip():
+                external_source = True
+                external_reasons.add(str(context.get("identity_external_source_reason", "")).strip())
+            shape = context.get("identity_text_shape")
+            shape_tuple = tuple(str(value) for value in shape) if isinstance(shape, list) else (str(row.get("raw", "")),)
+            same_text_items[(str(row.get("source_kind", "")), shape_tuple)].add(fingerprint)
+
+        needs_source = sorted(role for role in required_source_roles if roles.get(role, 0))
+        has_source = any(roles.get(role, 0) for role in source_roles)
+        if needs_source and not has_source and not external_source:
+            relationship_gaps.append(
+                {
+                    "identity_item_fingerprint": fingerprint,
+                    "item_ids": sorted(item_ids),
+                    "required_by_roles": needs_source,
+                    "unit_ids": [str(row.get("id", "")) for row in item_rows],
+                    "reason": "no structurally equal producer, container item, or trade output was scanned",
+                }
+            )
+        if len(item_ids) > 1:
+            conflicts.append(
+                {
+                    "identity_group": "",
+                    "unit_ids": [str(row.get("id", "")) for row in item_rows],
+                    "key_conflicts": {},
+                    "translation_conflicts": {},
+                    "structural_conflicts": ["one item fingerprint contains multiple item IDs"],
+                    "item_fingerprints": [fingerprint],
+                    "identity_slots": [],
+                }
+            )
+        item_summaries.append(
+            {
+                "identity_item_fingerprint": fingerprint,
+                "item_ids": sorted(item_ids),
+                "unit_count": len(item_rows),
+                "roles": dict(sorted(roles.items())),
+                "source_files": sorted(source_files),
+                "has_scanned_source": has_source,
+                "external_source_approved": external_source,
+                "external_source_reasons": sorted(external_reasons),
+            }
+        )
+
+    same_text_distinct_items = [
+        {
+            "source_kind": source_kind,
+            "text_shape": list(shape),
+            "item_fingerprints": sorted(fingerprints),
+            "item_count": len(fingerprints),
+        }
+        for (source_kind, shape), fingerprints in sorted(same_text_items.items())
+        if len(fingerprints) > 1
+    ]
+
+    blocking_count = len(conflicts) + len(unresolved) + len(relationship_gaps)
+
     return {
+        "schema": "mc-map-identity-qa.v2",
         "group_count": len(groups),
         "unit_count": sum(len(group) for group in groups.values()),
         "conflict_count": len(conflicts),
         "conflicts": conflicts,
         "groups": summaries,
+        "item_count": len(items),
+        "items": item_summaries,
+        "unresolved_count": len(unresolved),
+        "unresolved": unresolved,
+        "relationship_gap_count": len(relationship_gaps),
+        "relationship_gaps": relationship_gaps,
+        "same_text_distinct_item_count": len(same_text_distinct_items),
+        "same_text_distinct_items": same_text_distinct_items,
+        "blocking_count": blocking_count,
         "scope_note": (
-            "Static QA verifies canonical translation keys and translations within scanner identity groups. "
-            "It does not replace in-game trade, clear, predicate, NPC-selector, or quest-item testing."
+            "Static QA verifies parsed item structure fingerprints, canonical text-slot keys, and scanned "
+            "producer/container/trade/consumer relationships. It does not replace fresh-save in-game trade, "
+            "clear, predicate, NPC-selector, or quest-item testing."
         ),
     }
 
@@ -619,8 +746,13 @@ def make_resource_pack(args: argparse.Namespace) -> int:
                 )
             )
     identity_qa = identity_consistency_report(rows)
-    if identity_qa["conflict_count"]:
-        errors.append(f"identity-coupled translation/key conflicts: {identity_qa['conflict_count']} group(s)")
+    if identity_qa["blocking_count"]:
+        errors.append(
+            "identity QA blocked export: "
+            f"{identity_qa['conflict_count']} conflict(s), "
+            f"{identity_qa['unresolved_count']} unresolved unit(s), and "
+            f"{identity_qa['relationship_gap_count']} producer/consumer relationship gap(s)"
+        )
     lang_by_namespace: dict[str, dict[str, str]] = {}
     source_by_namespace: dict[str, dict[str, str]] = {}
     emitted_unit_ids: set[str] = set()
@@ -1149,9 +1281,10 @@ def make_project_files(args: argparse.Namespace) -> int:
         "5. Fill `translation` in the matching `translations/parts/workpack_###.jsonl` file.",
         "6. For `segments[]`, translate the full unit first, then fill each segment so the styled Minecraft component still reads naturally.",
         "7. When translation equals raw, set an approved review_status and concrete review_reason; otherwise it remains incomplete.",
-        "8. Keep one translation and canonical keys across every context.identity_coupled group.",
-        "9. Refresh `translation_progress.md` after each translated batch.",
-        "10. Run `merge-translations`, `validate-units`, and `qa-translations` before export.",
+        "8. Keep one translation and canonical keys across each structurally resolved context.identity_coupled item/slot group; never merge by wording alone.",
+        "9. Record unresolved identity decisions with evidence and run `resolve-item-identities` on merged translations before final QA.",
+        "10. Refresh `translation_progress.md` after each translated batch.",
+        "11. Run `merge-translations`, `validate-units`, and `qa-translations` before export.",
         "",
     ]
     (out_dir / "translation_instructions.md").write_text("\n".join(instructions), encoding="utf-8")
@@ -1739,6 +1872,8 @@ def write_translation_qa_markdown(path: Path, report: dict[str, Any]) -> None:
         f"- Unreviewed same-as-source slots: {report['unreviewed_same_as_source_count']}",
         f"- Identity groups: {report['identity_qa']['group_count']}",
         f"- Identity conflicts: {report['identity_qa']['conflict_count']}",
+        f"- Unresolved item identities: {report['identity_qa']['unresolved_count']}",
+        f"- Identity relationship gaps: {report['identity_qa']['relationship_gap_count']}",
         f"- Sign faces: {report['sign_qa']['face_count']}",
         f"- Complete sign faces: {report['sign_qa']['complete_face_count']}",
         "",
@@ -1763,6 +1898,23 @@ def write_translation_qa_markdown(path: Path, report: dict[str, Any]) -> None:
                 f"- `{item.get('identity_group', '')}` units={len(item.get('unit_ids', []))} "
                 f"key_conflicts={len(item.get('key_conflicts', {}))} "
                 f"translation_conflicts={len(item.get('translation_conflicts', {}))}"
+            )
+        lines.append("")
+    if report["identity_qa"].get("unresolved"):
+        lines.extend(["## Unresolved Item Identities", ""])
+        for item in report["identity_qa"]["unresolved"][:100]:
+            lines.append(
+                f"- `{item.get('unit_id', '')}` `{item.get('source_file', '')}`: "
+                f"`{raw_preview(str(item.get('raw', '')), 180)}`"
+            )
+        lines.append("")
+    if report["identity_qa"].get("relationship_gaps"):
+        lines.extend(["## Identity Relationship Gaps", ""])
+        for item in report["identity_qa"]["relationship_gaps"][:100]:
+            lines.append(
+                f"- `{item.get('identity_item_fingerprint', '')}` "
+                f"items={','.join(item.get('item_ids', []))} "
+                f"required_by={','.join(item.get('required_by_roles', []))}"
             )
         lines.append("")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1812,7 +1964,13 @@ def qa_translations(args: argparse.Namespace) -> int:
     if unreviewed:
         blocking_reasons.append(f"{len(unreviewed)} unchanged source slot(s) lack an approved status and reason")
     if identity_qa["conflict_count"]:
-        blocking_reasons.append(f"{identity_qa['conflict_count']} identity-coupled group(s) have conflicting keys or translations")
+        blocking_reasons.append(f"{identity_qa['conflict_count']} identity group(s) have key, translation, or structure conflicts")
+    if identity_qa["unresolved_count"]:
+        blocking_reasons.append(f"{identity_qa['unresolved_count']} identity-coupled unit(s) lack structural or reviewed manual identity")
+    if identity_qa["relationship_gap_count"]:
+        blocking_reasons.append(
+            f"{identity_qa['relationship_gap_count']} consumer/trade-input item(s) lack a structurally equal scanned source"
+        )
 
     report = {
         "schema": "mc-map-translation-qa.v1",
@@ -1841,9 +1999,12 @@ def qa_translations(args: argparse.Namespace) -> int:
     }
     out = Path(args.out).resolve()
     write_json(out, report)
+    identity_path = out.parent / "identity_qa.json"
+    write_json(identity_path, identity_qa)
     markdown_path = out.with_suffix(".md")
     write_translation_qa_markdown(markdown_path, report)
     print(f"qa_report: {out}")
+    print(f"identity_qa: {identity_path}")
     print(f"qa_review: {markdown_path}")
     print(f"status: {report['status']}")
     return 0 if not blocking_reasons else 4

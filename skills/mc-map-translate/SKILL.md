@@ -58,7 +58,8 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - Treat scanner coverage as a first-class QA surface. Review `scan_review.md`, `scan_report.json`, excluded `LastOutput` counts, aggregated sign groups, visual asset hints, and pending parser coverage before declaring translation coverage.
    - Treat modern datapacks as a priority source. Expect text in `.mcfunction`, `execute ... run ...` chains, macro function lines, storage JSON/SNBT, loot tables, item modifiers, advancements, predicates, and custom JSON under `datapacks/*/data/**`.
    - Require sign/hanging-sign text to be represented as one `sign` face unit, even when only one of four lines contains text. Verify `sign_faces_seen`, `aggregated_sign_groups`, four-line context, face direction, exact line anchors, and `block_pos` where available; isolated sign-line units are a scanner defect unless parsing failed and was reported.
-   - Treat item `custom_name`, `item_name`, and `lore` as potentially `identity_coupled`. Review `identity_coupled` groups before translation: offers, containers, rewards, `give`/`loot`/`item replace`, `clear`, and `execute if items` must retain equivalent text-component structure and canonical keys when they refer to the same identity text.
+   - Treat item `custom_name`, `item_name`, and `lore` as potentially `identity_coupled`. The scanner fingerprints the containing item ID plus full component/NBT structure (including custom data, model data, damage, enchantments, name, and lore slots; stack count/slot position are excluded) and assigns one canonical key per item fingerprint plus text slot. Review offers, containers, rewards, `give`, `item ... with`, `clear`, and `execute if/unless items` as one producer/consumer graph.
+   - Never merge item text by visible wording alone. Rows with `context.identity_resolution: unresolved` keep occurrence keys and block final QA. Review the generated `identity_review.json`, inspect exact anchors, fill its decisions, then use `resolve-item-identities`; include an evidence-based `review_reason`. Use an external-source approval only when the producer is genuinely runtime-generated or outside scanner coverage, and record why.
    - Use scanner-reported `function_call_graph` and `suspicious_text_hints` to recover dialogue order and review likely player-facing storage/macro/custom JSON strings that were not safely promoted to normal apply units.
    - After the first scan, summarize coverage by export mode and ask which of the four modes to produce. When `full_localization_recommendation.suggest_full_translation_mode` is true, recommend `hybrid-keyed-copy` as the safest complete mode for hardcoded JSON text, or ask whether to upgrade to `direct-text-copy` when direct-only text remains and the user wants maximum coverage.
    - If `scan_report.json` lists `map_resource_packs`, preserve those packs as the base layer for embedded outputs and mention that a standalone translation pack may be only an overlay unless merged with the original map pack.
@@ -83,7 +84,7 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - For puzzles, riddles, rhymes, lore, and jokes, preserve player experience over word-for-word meaning.
    - For units with `segments[]`, translate `raw` as the complete message first, then fill each `segments[].translation` so the preserved Minecraft component order still reads naturally.
    - Apply the same unchanged-text review rule to every segment. A translated sign face may legitimately retain `TNT`, a player name, or an ASCII divider on one line, but that line needs its own status/reason.
-   - Do not translate or independently re-key identity-coupled item occurrences. Use the scanner-provided canonical key and one group translation; conflicting keys or translations block delivery.
+   - Do not translate or independently re-key structurally matched identity-coupled item occurrences. Use the scanner-provided canonical key and one group translation per text slot. Same wording on different item fingerprints is not a duplicate; different lore/custom data/model data must remain distinct.
 
 5. Export safely.
    - `resource-pack-only`: generate language/resource files, zip the pack, and produce a QA report.
@@ -95,7 +96,7 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
 
 6. QA before final delivery.
    - Run schema validation on JSONL units and translation files.
-   - Run `qa-translations` and require `status: pass` without `--allow-incomplete`. It blocks unreviewed source-equal text, incomplete sign faces, identity-key conflicts, encoding damage, and structural errors.
+   - Run `qa-translations` and require `status: pass` without `--allow-incomplete`. It writes `qa/identity_qa.json` and blocks unreviewed source-equal text, incomplete sign faces, unresolved item identities, canonical-key/translation/structure conflicts, missing scanned producers for trade inputs/consumers/predicates, encoding damage, and structural errors.
    - Validate JSON text components and language JSON.
    - Check placeholders, selectors, color codes, newline counts, key coverage, untranslated residues, duplicate key conflicts, multilingual encoding integrity, and command breakage risk.
    - Produce a short report with coverage by source kind and export mode.
@@ -130,6 +131,7 @@ Use `scripts/mcmap_java_tools.py` for Java-specific inspection, scanning, packag
 python skills/mc-map-translate/scripts/mcmap_java_tools.py inspect path/to/world
 python skills/mc-map-translate/scripts/mcmap_java_tools.py scan path/to/world --out work/mymap --target ja_jp --map-slug mymap
 python skills/mc-map-translate/scripts/mcmap_java_tools.py scan path/to/world --out work/mymap --target ja_jp --map-slug mymap --project-layout --max-workpack-units 120
+python skills/mc-map-translate/scripts/mcmap_java_tools.py resolve-item-identities work/mymap/translations/translations.jsonl --decisions work/mymap/identity_review.json --out work/mymap/translations/translations.identity-resolved.jsonl --namespace mcmap --map-slug mymap
 python skills/mc-map-translate/scripts/mcmap_java_tools.py scan path/to/world --out work/mymap --target ja_jp --no-binary
 python skills/mc-map-translate/scripts/mcmap_java_tools.py scan path/to/world --out work/mymap --target ja_jp --include-last-output
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world --translations work/mymap/translations/translations.jsonl --out work/mymap/exports/world-keyed --resource-pack work/mymap/exports/hybrid-resource-pack
@@ -161,7 +163,7 @@ For staged AI translation, treat `index/manifest.json` as the entry point. Load 
 - Do not casually rewrite backslash escapes such as `\n`, `\t`, `\"`, `\\`, or `\uXXXX`; they may belong to JSON, SNBT, command syntax, or Minecraft rendering rather than prose.
 - Do not claim resource-pack-only coverage for hardcoded text unless the map already uses translation keys or the output mode includes key injection.
 - Do not replace a map's existing `resources.zip` with a translation-only pack unless the user explicitly asks for replacement; merge generated language files into the copied existing pack by default.
-- Do not generate hybrid keys per occurrence for item names/lore that may participate in NBT/component equality. Preserve scanner-generated identity groups and canonical keys, and block conflicting groups in QA.
+- Do not generate hybrid keys per occurrence for structurally equal item name/lore slots that may participate in NBT/component equality. Do not globally merge equal visible strings either. Preserve scanner fingerprints and canonical keys; unresolved identities and conflicts block QA.
 - Do not mark source-equal text as translated without an approved `review_status` and non-empty `review_reason`.
 - Do not deliver from an interim `qa-translations --allow-incomplete` report.
 - Do not translate a real map without maintaining `translation_progress.md` or an equivalent user-approved persistent progress TODO.

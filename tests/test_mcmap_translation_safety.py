@@ -29,6 +29,61 @@ def compound(**items: java_tools.NbtTag) -> java_tools.NbtTag:
     return java_tools.NbtTag(10, list(items.items()))
 
 
+def compound_pairs(*items: tuple[str, java_tools.NbtTag]) -> java_tools.NbtTag:
+    return java_tools.NbtTag(10, list(items))
+
+
+def item_stack(name: str, marker: str = "kitatcho", lore: str = "") -> java_tools.NbtTag:
+    components: list[tuple[str, java_tools.NbtTag]] = [
+        ("minecraft:custom_name", string_tag(json.dumps({"text": name}, separators=(",", ":")))),
+        ("minecraft:custom_data", compound(currency=string_tag(marker))),
+    ]
+    if lore:
+        components.append(
+            (
+                "minecraft:lore",
+                java_tools.NbtTag(9, (8, [string_tag(json.dumps({"text": lore}, separators=(",", ":")))])),
+            )
+        )
+    return compound_pairs(
+        ("id", string_tag("minecraft:slime_ball")),
+        ("count", int_tag(1)),
+        ("components", compound_pairs(*components)),
+    )
+
+
+def item_identity_payload(*, include_source: bool = True, second_marker: str = "") -> bytes:
+    recipe = compound_pairs(
+        ("buy", item_stack("Kitatcho Coin")),
+        ("sell", compound_pairs(("id", string_tag("minecraft:diamond")), ("count", int_tag(1)))),
+    )
+    villager = compound_pairs(
+        ("id", string_tag("minecraft:villager")),
+        ("Offers", compound_pairs(("Recipes", java_tools.NbtTag(9, (10, [recipe]))))),
+    )
+    block_entities = [villager]
+    if include_source:
+        block_entities.append(
+            compound_pairs(
+                ("id", string_tag("minecraft:chest")),
+                ("Items", java_tools.NbtTag(9, (10, [item_stack("Kitatcho Coin")]))),
+            )
+        )
+    if second_marker:
+        block_entities.append(
+            compound_pairs(
+                ("id", string_tag("minecraft:chest")),
+                ("Items", java_tools.NbtTag(9, (10, [item_stack("Kitatcho Coin", second_marker)]))),
+            )
+        )
+    tree = java_tools.NbtTree(
+        10,
+        "",
+        compound_pairs(("block_entities", java_tools.NbtTag(9, (10, block_entities)))),
+    )
+    return java_tools.write_nbt_tree(tree)
+
+
 def sign_tag(x: int, y: int, z: int, lines: list[str]) -> java_tools.NbtTag:
     messages = [string_tag(json.dumps({"text": line}, separators=(",", ":"))) for line in lines]
     return compound(
@@ -78,33 +133,232 @@ class ScannerSafetyTests(unittest.TestCase):
         self.assertEqual(1, len(by_x[11]["segments"]))
 
     def test_identity_coupled_item_text_uses_one_canonical_key(self) -> None:
-        rows = []
-        for source_file, nbt_path in (
-            ("region/r.0.0.mca", "root.block_entities[0].Offers.Recipes[0].buy.components.minecraft:custom_name"),
-            ("region/r.0.0.mca", "root.block_entities[2].Items[0].components.minecraft:custom_name"),
-        ):
-            rows.append(
-                java_tools.make_unit(
-                    edition="java",
-                    source_kind="item_name",
-                    source_file=source_file,
-                    address={"nbt_path": nbt_path, "json_path": "$"},
-                    raw="Kitatcho Coin",
-                    mode_support=["hybrid-key-injection"],
-                    confidence="high",
-                    resource_namespace="mcmap",
-                    translation_key="temporary.key",
-                    context={"text_nodes": [{"json_path": "$.text", "text": "Kitatcho Coin"}]},
-                )
-            )
+        rows = java_tools.scan_nbt_items(
+            java_tools.scan_nbt_strings(item_identity_payload()),
+            source_file="region/r.0.0.mca",
+            namespace="mcmap",
+            map_slug="fixture",
+            include_last_output=False,
+            counters=Counter(),
+        )
 
         summary = java_tools.canonicalize_identity_keys(rows, "mcmap", "fixture")
 
         self.assertEqual(1, summary["group_count"])
         self.assertEqual(2, summary["max_group_size"])
+        self.assertEqual(0, summary["unresolved_unit_count"])
         self.assertEqual(1, len({row["translation_key"] for row in rows}))
         self.assertTrue(all(row["context"]["identity_coupled"] for row in rows))
         self.assertEqual("trade_input", rows[0]["context"]["identity_role"])
+        self.assertEqual("container", rows[1]["context"]["identity_role"])
+
+    def test_same_name_with_different_custom_data_is_not_merged(self) -> None:
+        rows = java_tools.scan_nbt_items(
+            java_tools.scan_nbt_strings(item_identity_payload(second_marker="other-currency")),
+            source_file="region/r.0.0.mca",
+            namespace="mcmap",
+            map_slug="fixture",
+            include_last_output=False,
+            counters=Counter(),
+        )
+        java_tools.canonicalize_identity_keys(rows, "mcmap", "fixture")
+
+        fingerprints = {row["context"]["identity_item_fingerprint"] for row in rows}
+        self.assertEqual(2, len(fingerprints))
+        other = [row for row in rows if "block_entities[2]" in row["address"]["nbt_path"]][0]
+        self.assertNotEqual(rows[0]["translation_key"], other["translation_key"])
+
+    def test_same_name_with_different_lore_is_not_merged(self) -> None:
+        chests = []
+        for lore in ("Opens the red vault", "Opens the blue vault"):
+            chests.append(
+                compound_pairs(
+                    ("id", string_tag("minecraft:chest")),
+                    ("Items", java_tools.NbtTag(9, (10, [item_stack("Vault Key", lore=lore)]))),
+                )
+            )
+        payload = java_tools.write_nbt_tree(
+            java_tools.NbtTree(
+                10,
+                "",
+                compound_pairs(("block_entities", java_tools.NbtTag(9, (10, chests)))),
+            )
+        )
+        rows = java_tools.scan_nbt_items(
+            java_tools.scan_nbt_strings(payload),
+            source_file="region/r.0.0.mca",
+            namespace="mcmap",
+            map_slug="fixture",
+            include_last_output=False,
+            counters=Counter(),
+        )
+        java_tools.canonicalize_identity_keys(rows, "mcmap", "fixture")
+        names = [row for row in rows if row["source_kind"] == "item_name"]
+        lore_rows = [row for row in rows if row["source_kind"] == "item_lore"]
+        self.assertEqual(2, len({row["context"]["identity_item_fingerprint"] for row in names}))
+        self.assertEqual(2, len({row["translation_key"] for row in names}))
+        self.assertEqual({"lore[0]"}, {row["context"]["identity_slot"] for row in lore_rows})
+
+    def test_command_producer_clear_and_predicate_match_nbt_item(self) -> None:
+        rows = java_tools.scan_nbt_items(
+            java_tools.scan_nbt_strings(item_identity_payload()),
+            source_file="region/r.0.0.mca",
+            namespace="mcmap",
+            map_slug="fixture",
+            include_last_output=False,
+            counters=Counter(),
+        )
+        item_spec = (
+            "minecraft:slime_ball["
+            "minecraft:custom_name='{\"text\":\"Kitatcho Coin\"}',"
+            "minecraft:custom_data={currency:\"kitatcho\"}]"
+        )
+        for line_no, command in enumerate(
+            (
+                f"give @s {item_spec}",
+                f"clear @s {item_spec}",
+                f"execute if items entity @s inventory.* {item_spec} run say matched",
+                (
+                    "execute if entity @e[nbt={Inventory:[{id:\"minecraft:slime_ball\",count:1,"
+                    "components:{\"minecraft:custom_name\":'{\"text\":\"Kitatcho Coin\"}',"
+                    "\"minecraft:custom_data\":{currency:\"kitatcho\"}}}]}] run say matched"
+                ),
+            ),
+            1,
+        ):
+            rows.extend(
+                java_tools.scan_command_line(
+                    command,
+                    source_file="datapacks/fixture/data/test/function/identity.mcfunction",
+                    base_address={"line": line_no},
+                    namespace="mcmap",
+                    map_slug="fixture",
+                    fallback_kind="function",
+                    confidence="high",
+                )
+            )
+
+        summary = java_tools.canonicalize_identity_keys(rows, "mcmap", "fixture")
+        item_rows = [row for row in rows if row["source_kind"] == "item_name"]
+        self.assertEqual(1, summary["group_count"])
+        self.assertEqual(1, len({row["context"]["identity_item_fingerprint"] for row in item_rows}))
+        self.assertEqual(1, len({row["translation_key"] for row in item_rows}))
+        self.assertEqual(
+            {"trade_input", "container", "producer", "consumer", "predicate"},
+            {row["context"]["identity_role"] for row in item_rows},
+        )
+
+    def test_score_name_inside_text_display_is_not_item_text(self) -> None:
+        command = (
+            'summon text_display ~ ~ ~ {text:[{"text":"Day: "},'
+            '{"score":{"name":"day","objective":"time"}}]}'
+        )
+        rows = java_tools.scan_command_line(
+            command,
+            source_file="test.mcfunction",
+            base_address={"line": 1},
+            namespace="mcmap",
+            map_slug="fixture",
+            fallback_kind="function",
+            confidence="high",
+        )
+        self.assertFalse(any(row["source_kind"] in {"item_name", "item_lore"} for row in rows))
+        self.assertFalse(any(row["raw"] == "day" for row in rows))
+
+    def test_unparsed_partial_item_predicate_is_identity_blocking(self) -> None:
+        command = (
+            "execute if items entity @s inventory.* "
+            "minecraft:slime_ball[minecraft:custom_name~'{\"text\":\"Quest Coin\"}'] run say yes"
+        )
+        rows = java_tools.scan_command_line(
+            command,
+            source_file="test.mcfunction",
+            base_address={"line": 1},
+            namespace="mcmap",
+            map_slug="fixture",
+            fallback_kind="function",
+            confidence="high",
+        )
+        summary = java_tools.canonicalize_identity_keys(rows, "mcmap", "fixture")
+        item_rows = [row for row in rows if row["source_kind"] == "item_name"]
+        self.assertEqual(1, len(item_rows))
+        self.assertEqual("unresolved", item_rows[0]["context"]["identity_resolution"])
+        self.assertEqual("predicate", item_rows[0]["context"]["identity_role"])
+        self.assertEqual(1, summary["unresolved_unit_count"])
+
+    def test_unparsed_item_text_remains_unresolved_and_occurrence_keyed(self) -> None:
+        rows = []
+        for index in range(2):
+            rows.append(
+                java_tools.make_unit(
+                    edition="java",
+                    source_kind="item_name",
+                    source_file="unknown.json",
+                    address={"json_path": f"$.items[{index}].name"},
+                    raw="Coin",
+                    mode_support=["hybrid-key-injection"],
+                    confidence="low",
+                    resource_namespace="mcmap",
+                    translation_key=f"temporary.key.{index}",
+                )
+            )
+        summary = java_tools.canonicalize_identity_keys(rows, "mcmap", "fixture")
+        self.assertEqual(2, summary["unresolved_unit_count"])
+        self.assertEqual(2, len({row["translation_key"] for row in rows}))
+
+    def test_reviewed_manual_identity_decisions_canonicalize_without_code_edits(self) -> None:
+        rows = []
+        for index, role in enumerate(("producer", "consumer")):
+            row = java_tools.make_unit(
+                edition="java",
+                source_kind="item_name",
+                source_file="unknown.json",
+                address={"json_path": f"$.items[{index}].name"},
+                raw="Quest Key",
+                mode_support=["hybrid-key-injection"],
+                confidence="low",
+                resource_namespace="mcmap",
+                translation_key=f"temporary.key.{index}",
+            )
+            row["context"]["identity_role"] = role
+            rows.append(row)
+        java_tools.canonicalize_identity_keys(rows, "mcmap", "fixture")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "translations.jsonl"
+            decisions = root / "identity_decisions.json"
+            out = root / "resolved.jsonl"
+            java_tools.write_jsonl(source, rows)
+            decisions.write_text(
+                json.dumps(
+                    {
+                        "namespace": "mcmap",
+                        "map_slug": "fixture",
+                        "groups": [
+                            {
+                                "name": "quest_key",
+                                "item_id": "minecraft:tripwire_hook",
+                                "unit_ids": [row["id"] for row in rows],
+                                "review_reason": "Both anchors use the same custom-data quest key.",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                translations=str(source),
+                decisions=str(decisions),
+                out=str(out),
+                namespace="",
+                map_slug="",
+                report="",
+            )
+            self.assertEqual(0, java_tools.resolve_item_identities(args))
+            resolved = contract.read_jsonl(out)
+            self.assertEqual(1, len({row["translation_key"] for row in resolved}))
+            self.assertTrue(all(row["context"]["identity_resolution"] == "manual" for row in resolved))
 
     def test_sign_face_hybrid_apply_reports_by_face(self) -> None:
         payload = sign_fixture_payload()
@@ -141,6 +395,58 @@ class ScannerSafetyTests(unittest.TestCase):
             for segment in row["segments"]:
                 component = json.loads(values[segment["nbt_path"]])
                 self.assertEqual(segment["translation_key"], component["translate"])
+
+    def test_apply_hybrid_keys_smoke_copies_world_and_preserves_source(self) -> None:
+        payload = sign_fixture_payload()
+        rows = java_tools.scan_nbt_items(
+            java_tools.scan_nbt_strings(payload),
+            source_file="data/signs.dat",
+            namespace="mcmap",
+            map_slug="fixture",
+            include_last_output=False,
+            counters=Counter(),
+        )
+        for row in rows:
+            translated_segments = []
+            for segment in row["segments"]:
+                segment["translation"] = f"Localized {segment['raw']}"
+                segment["review_status"] = "translated"
+                translated_segments.append(segment["translation"])
+            row["translation"] = "\n".join(translated_segments)
+            row["review_status"] = "translated"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            world = root / "world"
+            (world / "data").mkdir(parents=True)
+            (world / "level.dat").write_bytes(b"fixture-level")
+            source_nbt = world / "data" / "signs.dat"
+            source_nbt.write_bytes(payload)
+            translations = root / "translations.jsonl"
+            java_tools.write_jsonl(translations, rows)
+            out = root / "world-keyed"
+            args = argparse.Namespace(
+                source=str(world),
+                out=str(out),
+                translations=str(translations),
+                resource_pack="",
+                allow_separate_resource_pack=False,
+                multi_text_mode="split-nodes",
+                min_confidence="medium",
+                source_kind="",
+                unit_id="",
+                translated_only=True,
+                dry_run=False,
+                report="",
+                allow_no_changes=False,
+                force=False,
+                replace_existing_resource_pack=False,
+            )
+            self.assertEqual(0, java_tools.apply_hybrid_keys(args))
+            self.assertEqual(payload, source_nbt.read_bytes())
+            self.assertNotEqual(payload, (out / "data" / "signs.dat").read_bytes())
+            report = json.loads((out / "mcmap_hybrid_apply_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(2, report["changed_units"])
 
     def test_residual_audit_groups_sign_faces(self) -> None:
         findings: list[dict[str, object]] = []
@@ -198,6 +504,97 @@ class TranslationContractTests(unittest.TestCase):
             )
         report = contract.identity_consistency_report(rows)
         self.assertEqual(1, report["conflict_count"])
+
+    def test_identity_qa_requires_source_for_trade_input(self) -> None:
+        rows = java_tools.scan_nbt_items(
+            java_tools.scan_nbt_strings(item_identity_payload(include_source=False)),
+            source_file="region/r.0.0.mca",
+            namespace="mcmap",
+            map_slug="fixture",
+            include_last_output=False,
+            counters=Counter(),
+        )
+        java_tools.canonicalize_identity_keys(rows, "mcmap", "fixture")
+        report = contract.identity_consistency_report(rows)
+        self.assertEqual(1, report["relationship_gap_count"])
+        self.assertGreater(report["blocking_count"], 0)
+
+        rows[0]["context"]["identity_external_source"] = True
+        rows[0]["context"]["identity_external_source_reason"] = "Granted by an unscannable runtime plugin."
+        report = contract.identity_consistency_report(rows)
+        self.assertEqual(0, report["relationship_gap_count"])
+
+    def test_identity_qa_reports_same_text_on_distinct_items_without_merging(self) -> None:
+        rows = java_tools.scan_nbt_items(
+            java_tools.scan_nbt_strings(item_identity_payload(second_marker="other-currency")),
+            source_file="region/r.0.0.mca",
+            namespace="mcmap",
+            map_slug="fixture",
+            include_last_output=False,
+            counters=Counter(),
+        )
+        java_tools.canonicalize_identity_keys(rows, "mcmap", "fixture")
+        report = contract.identity_consistency_report(rows)
+        self.assertEqual(1, report["same_text_distinct_item_count"])
+        self.assertEqual(0, report["conflict_count"])
+
+    def test_interim_translation_qa_does_not_bypass_identity_gaps(self) -> None:
+        rows = java_tools.scan_nbt_items(
+            java_tools.scan_nbt_strings(item_identity_payload(include_source=False)),
+            source_file="region/r.0.0.mca",
+            namespace="mcmap",
+            map_slug="fixture",
+            include_last_output=False,
+            counters=Counter(),
+        )
+        java_tools.canonicalize_identity_keys(rows, "mcmap", "fixture")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            units = root / "translations.jsonl"
+            out = root / "qa" / "translation_qa.json"
+            java_tools.write_jsonl(units, rows)
+            args = argparse.Namespace(translations=str(units), out=str(out), allow_incomplete=True)
+            self.assertEqual(4, contract.qa_translations(args))
+            identity_report = json.loads((out.parent / "identity_qa.json").read_text(encoding="utf-8"))
+            self.assertEqual(1, identity_report["relationship_gap_count"])
+
+    def test_hybrid_apply_refuses_identity_relationship_gap(self) -> None:
+        rows = java_tools.scan_nbt_items(
+            java_tools.scan_nbt_strings(item_identity_payload(include_source=False)),
+            source_file="data/items.dat",
+            namespace="mcmap",
+            map_slug="fixture",
+            include_last_output=False,
+            counters=Counter(),
+        )
+        java_tools.canonicalize_identity_keys(rows, "mcmap", "fixture")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            world = root / "world"
+            world.mkdir()
+            (world / "level.dat").write_bytes(b"fixture")
+            translations = root / "translations.jsonl"
+            java_tools.write_jsonl(translations, rows)
+            out = root / "blocked-output"
+            args = argparse.Namespace(
+                source=str(world),
+                out=str(out),
+                translations=str(translations),
+                resource_pack="",
+                allow_separate_resource_pack=False,
+                multi_text_mode="split-nodes",
+                min_confidence="medium",
+                source_kind="",
+                unit_id="",
+                translated_only=True,
+                dry_run=False,
+                report="",
+                allow_no_changes=True,
+                force=False,
+                replace_existing_resource_pack=False,
+            )
+            self.assertEqual(1, java_tools.apply_hybrid_keys(args))
+            self.assertFalse(out.exists())
 
     def test_audit_excludes_source_language_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

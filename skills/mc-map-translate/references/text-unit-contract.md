@@ -124,12 +124,27 @@ Item display text can also participate in gameplay identity. Scanner output may 
     "identity_coupled": true,
     "identity_group": "stable-group-id",
     "identity_role": "trade_input",
+    "identity_resolution": "structural",
+    "identity_confidence": "high",
+    "identity_item_id": "minecraft:slime_ball",
+    "identity_item_fingerprint": "stable-item-structure-id",
+    "identity_non_text_fingerprint": "stable-redacted-structure-id",
+    "identity_item_root": "root.block_entities[0].Offers.Recipes[0].buy",
+    "identity_slot": "name",
     "identity_text_shape": ["Kitatcho Coin"]
   }
 }
 ```
 
-Common roles are `trade_input`, `trade_output`, `producer`, `consumer`, and `item_component`. Rows in the same identity group must use the same unit key and matching segment keys. Do not regenerate these keys from occurrence anchors. The current static group is based on source kind and visible text-node shape; it protects equivalent display components but does not prove complete item/NBT equality, so in-game trade and predicate tests remain required.
+Common roles are `trade_input`, `trade_output`, `container`, `producer`, `consumer`, `predicate`, and `item_component`.
+
+`identity_item_fingerprint` is computed from the parsed item ID and canonical full item structure. It includes non-text components and custom data as well as source name/lore component structure, while excluding top-level stack count and container slot so differently sized stacks of the same logical item can match. `identity_non_text_fingerprint` redacts name/lore string values and exists for diagnosis; it is not sufficient by itself to merge items. The canonical `identity_group` combines the full item fingerprint with one text slot such as `name` or `lore[0]`.
+
+Rows in the same identity group must use the same unit key and matching segment keys. Rows with equal visible text but different item fingerprints must remain separate. This prevents both occurrence-key divergence and accidental merging of same-named items with different lore, model data, damage, enchantments, or custom data.
+
+If the scanner cannot recover a containing item structure, it sets `identity_resolution` to `unresolved`, preserves the occurrence key, and final QA blocks delivery. Resolve these rows through `resolve-item-identities` and a reviewed decisions JSON instead of editing keys ad hoc. A manual group must include a non-empty `review_reason`; an approved external/runtime source must include `identity_external_source_reason`.
+
+Static fingerprints and relationship checks do not replace fresh-save gameplay tests. Dynamic macros, storage-built items, loot pipelines, plugins, and named-entity selectors can still require explicit runtime validation.
 
 ## Binary Anchors
 

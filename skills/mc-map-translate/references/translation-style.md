@@ -47,7 +47,7 @@ If a term appears in lore and gameplay instructions, choose one translation that
 - Preserve escape shape. A JSONL file may show a real newline as `\n` because JSON serializes it that way; keep it as a real newline in the decoded value. If the decoded source text contains literal backslash+n (`\\n`), keep those two characters unless the command/JSON/SNBT layer is being deliberately rewritten.
 - Treat backslash escapes such as `\n`, `\t`, `\"`, `\\`, and `\uXXXX` as protected syntax until proven to be ordinary prose. Do not double-escape them and do not let a spreadsheet, shell, or model rewrite turn them into another layer.
 - Preserve JSON text component styling and events.
-- For `context.identity_coupled`, use one translation across the identity group and preserve its canonical unit/segment keys. A currency, quest key, named reward, or trade item may be compared by its full component structure; equal visible wording with different generated keys can break gameplay.
+- For structurally resolved `context.identity_coupled` rows, use one translation across each item-fingerprint/text-slot group and preserve its canonical unit/segment keys. A currency, quest key, named reward, or trade item may be compared by full component structure; equal visible wording with different generated keys can break gameplay, while equal wording on different fingerprints may represent intentionally different items.
 
 ## Multilingual Encoding
 

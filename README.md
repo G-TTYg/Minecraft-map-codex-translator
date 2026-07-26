@@ -20,7 +20,7 @@ It can help with:
 - datapack JSON, storage-like JSON/SNBT, item names, lore, books, and sign text;
 - supported `.dat` NBT and `.mca` region/chunk text;
 - whole sign-face units with four-line context and block-position cross-checks;
-- identity-coupled item names/lore used by villager offers, rewards, `clear`, and item predicates;
+- structure-fingerprinted item names/lore used by villager offers, containers, rewards, `clear`, and item predicates;
 - residual-English QA after export.
 
 Bedrock Edition is not supported.
@@ -92,16 +92,17 @@ Codex should follow this flow for real maps:
 2. Scan the map into `translation_units.jsonl`.
 3. Create the indexed multi-file project layout.
 4. Read `scan_review.md` and `scan_report.json`.
-5. Explain the four export modes and ask which mode to produce.
-6. Build or update `glossary.md`.
-7. Maintain `translation_progress.md` as the persistent TODO list.
-8. Translate one contextual workpack at a time.
-9. Merge staged translations.
-10. Classify every deliberate source-equal result with a review status and reason.
-11. Run blocking translation/sign/identity QA.
-12. Export the selected mode.
-13. Run apply reports and target-locale residual-English QA.
-14. Generate one `exports/DELIVERY.md` naming the canonical output.
+5. Review `identity_coupled` rows and record every structurally unparsed item in a reviewed decisions JSON.
+6. Explain the four export modes and ask which mode to produce.
+7. Build or update `glossary.md`.
+8. Maintain `translation_progress.md` as the persistent TODO list.
+9. Translate one contextual workpack at a time.
+10. Merge staged translations, then run `resolve-item-identities` when identity decisions exist.
+11. Classify every deliberate source-equal result with a review status and reason.
+12. Run blocking translation/sign/identity QA; keep the generated `qa/identity_qa.json`.
+13. Export the selected mode.
+14. Run apply reports and target-locale residual-English QA.
+15. Generate one `exports/DELIVERY.md` naming the canonical output.
 
 Codex should not load the entire map into the model context. The scanner creates a searchable/indexed project so Codex can load only the relevant workpack, source summaries, and nearby context for each translation batch.
 
@@ -203,6 +204,7 @@ A normal scan creates:
 - `scan_review.md`: human-readable scan triage;
 - `glossary.md`: terminology decisions;
 - `translation_progress.md`: persistent TODO list;
+- `identity_review.json`: scanner-generated unresolved-item review template and decisions file;
 - `index/manifest.json`: entry point for staged translation;
 - `index/*.jsonl`: compact searchable indexes;
 - `context/source-summaries/*.md`: source-level summaries;
@@ -210,7 +212,8 @@ A normal scan creates:
 - `translations/parts/*.jsonl`: staged AI translation outputs;
 - `translations/translations.jsonl`: merged canonical translation file;
 - `exports/`: generated resource packs and copied map outputs;
-- `qa/`: residual-English audits and QA reports.
+- `qa/`: residual-English audits and QA reports;
+- `qa/identity_qa.json`: item structure, canonical-key, unresolved-identity, and producer/consumer relationship QA;
 - `exports/DELIVERY.md`: the exact mode and single canonical artifact users should install/play.
 
 ## Translation Quality Rules
@@ -222,7 +225,8 @@ Codex should:
 - keep terminology consistent through `glossary.md`;
 - translate grouped signs/components as complete messages before filling segment-level translations;
 - never count `translation == raw` as reviewed unless `review_status` is `intentional_name`, `code`, `ascii_art`, or `puzzle_token` and `review_reason` explains why;
-- keep scanner-generated canonical keys for `identity_coupled` item names/lore;
+- keep scanner-generated canonical keys for structurally resolved `identity_coupled` item name/lore slots;
+- never merge unresolved item text merely because its visible wording matches; use `resolve-item-identities` with reviewed evidence instead;
 - preserve escape semantics such as real newlines versus literal `\\n`;
 - treat UTF-8 and multilingual text carefully, especially on Windows terminals;
 - report uncovered text honestly instead of claiming false coverage.
@@ -235,7 +239,7 @@ Codex should not call external translation APIs, browser translators, or third-p
 - Resource packs cannot translate arbitrary hardcoded literals unless the copied map is patched to use translation keys.
 - PNG textures, custom bitmap fonts, map art, and model textures may contain visual English that requires separate asset localization or manual QA.
 - Direct text replacement is intentionally separate from hybrid key injection because it has a higher risk profile.
-- Static identity QA verifies key/translation consistency, but villager trades, `clear`, predicates, quest items, and named-NPC selectors still need fresh-save in-game tests.
+- Static identity QA verifies parsed item ID/components/custom-data structure, text-slot keys, and scanned source/consumer relationships. Dynamic loot, macros, external producers, named-NPC selectors, and every identity-sensitive workflow still need fresh-save in-game tests.
 - Visual asset hints use path filtering; OCR or visual inspection is still required to confirm text baked into PNG/font/map-art assets.
 - Parser coverage for unusual binary/NBT forms may be reported as pending rather than guessed.
 

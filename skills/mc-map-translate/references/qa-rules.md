@@ -86,13 +86,25 @@ For any world patch, report:
 
 ## Identity Gameplay QA
 
-Static identity QA proves only that scanner-defined groups use consistent translation keys and translations. For currencies, quest items, keys, named NPCs, and predicate-driven rewards, also test a fresh save in game:
+`qa-translations` writes a separate `identity_qa.json`. Final delivery is blocked when it finds:
+
+- an `identity_coupled` row without a parsed structural identity or reviewed manual identity;
+- multiple item fingerprints or text slots inside one canonical identity group;
+- different translation keys or translations inside one identity slot group;
+- a `trade_input`, `consumer`, or `predicate` item with no structurally equal scanned `producer`, `container`, or `trade_output`;
+- a manual group or external-source exception without a concrete review reason.
+
+The report also lists equal visible wording found on different item fingerprints. This is diagnostic, not automatically an error: same-named items with different lore/custom data should remain separate.
+
+Static identity QA proves parsed structure and scanned relationships, not runtime behavior. For currencies, quest items, keys, named NPCs, and predicate-driven rewards, also test a fresh save in game:
 
 1. obtain each item from every relevant producer;
 2. use it in each villager trade or menu consumer;
 3. test `clear`, `execute if items`, predicates, quest completion, and rewards;
 4. reload the map and repeat one representative path;
 5. verify similarly named items with different lore/custom data were not merged.
+
+Use `resolve-item-identities` only after reading all referenced anchors and non-text evidence. Approve an external source only for a documented macro/storage/plugin/dynamic-loot path that the scanner cannot materialize. Do not use the exception merely to make QA green.
 
 Do not generalize a raw global string replacement as the fix for identity failures. Repair canonical keys through exact scanner anchors and regenerate the copied map.
 
