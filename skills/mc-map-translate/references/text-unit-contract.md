@@ -144,7 +144,36 @@ Rows in the same identity group must use the same unit key and matching segment 
 
 If the scanner cannot recover a containing item structure, it sets `identity_resolution` to `unresolved`, preserves the occurrence key, and final QA blocks delivery. Resolve these rows through `resolve-item-identities` and a reviewed decisions JSON instead of editing keys ad hoc. A manual group must include a non-empty `review_reason`; an approved external/runtime source must include `identity_external_source_reason`.
 
-Static fingerprints and relationship checks do not replace fresh-save gameplay tests. Dynamic macros, storage-built items, loot pipelines, plugins, and named-entity selectors can still require explicit runtime validation.
+Entity names that are also referenced by selectors use separate context metadata:
+
+```json
+{
+  "context": {
+    "selector_identity_coupled": true,
+    "selector_identity_role": "entity_custom_name",
+    "selector_identity_strategy": "preserve-source-custom-name",
+    "selector_references": [
+      {
+        "reference_id": "stable-reference-id",
+        "source_file": "datapacks/map/data/map/function/tick.mcfunction",
+        "address": {"function_line": 12},
+        "selector": "@e[name=Guide]",
+        "selector_span": [11, 25],
+        "argument": "name",
+        "match_kind": "name",
+        "name": "Guide",
+        "negated": false,
+        "dynamic": false
+      }
+    ]
+  },
+  "mode_support": []
+}
+```
+
+`selector_identity_role` is `entity_custom_name` for a visible entity-name producer and `selector_predicate_literal` for hardcoded text inside `@e[nbt={CustomName:...}]`. Both roles preserve the exact source value and remove copied-world patch modes. Fill the unit and all segments source-equal with `review_status: intentional_name` and a reason naming the selector dependency. `qa/identity_qa.json` blocks changed translations, missing preserve strategy, or re-enabled `hybrid-key-injection`/`embedded-direct`.
+
+Static fingerprints and relationship checks do not replace fresh-save gameplay tests. Recognized static named-entity selectors are protected, but dynamic macros, storage-built items, loot pipelines, plugins, and runtime-built selectors still require explicit runtime validation.
 
 ## Binary Anchors
 

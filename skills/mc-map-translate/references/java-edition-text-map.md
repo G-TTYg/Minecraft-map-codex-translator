@@ -64,6 +64,8 @@ Plain `nbt_text`, `storage_text`, `say`, and low-confidence custom JSON units wi
 
 `item_name` and `item_lore` can be both display text and identity data. If they occur in villager offers, generated rewards, containers, `give`/`loot`/`item replace`, `clear`, `execute if/unless items`, or predicates, treat scanner `identity_coupled` metadata as a hard constraint. Parsed items use a full item-structure fingerprint and one key per name/lore slot. Equal-looking rows with different fingerprints must not merge; structurally equal rows must not receive occurrence-specific keys.
 
+`entity_name` can likewise be display text and selector identity. When `selector_identity.json` links it to static `@e[name=...]` or `@e[nbt={CustomName:...}]`, preserve the source value and do not key-inject or direct-patch it. Arguments such as `tag`, `type`, `scores`, and `predicate` remain logic-only. Localizing the visible name safely requires a separately validated migration to stable entity tags.
+
 ## Translation Key Strategy
 
 For generated keys, use:
@@ -94,4 +96,4 @@ When false positives dominate a source folder, use `make-workpacks --source-file
 - an NPC selector based on `CustomName` stops finding its target;
 - unrelated items with the same short name are incorrectly merged despite different lore/custom data.
 
-Static QA now checks parsed full item fingerprints, canonical slot keys, unresolved rows, and scanned producer/consumer relationships. It still cannot prove runtime macro/storage/loot behavior or named-NPC selector behavior. Keep exact anchors and perform fresh-save in-game tests for every identity-sensitive workflow.
+Static QA now checks parsed full item fingerprints, canonical slot keys, unresolved rows, scanned producer/consumer relationships, and recognized static named-entity selector coupling. It still cannot prove runtime macro/storage/loot behavior or dynamically constructed selectors. Keep exact anchors and perform fresh-save in-game tests for every identity-sensitive workflow.

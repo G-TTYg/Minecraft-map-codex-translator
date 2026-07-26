@@ -51,10 +51,20 @@ Roles form a static relationship graph: `producer`, `container`, and `trade_outp
 
 If the containing item cannot be parsed, preserve an occurrence key and mark the row `identity_resolution: unresolved`. Resolve it through the bundled decisions tool only after comparing the exact non-text evidence and producer/consumer intent. Never repair identity through global string replacement.
 
+## Selector-Coupled Entity Names
+
+An entity `CustomName` may be visible text and command identity at the same time. Scan every command block and `.mcfunction` command for static `@e[name=Guide]`, negated `@e[name=!Guide]`, quoted/escaped forms, and `@e[nbt={CustomName:'{"text":"Guide"}'}]`. This includes selectors in `execute` wrappers and JSON text-component selector fields.
+
+Store references in `selector_identity.json` with the source file, function line or NBT path, selector span, match kind, negation, and macro/dynamic state. Link an exact static selector name to every scanned `entity_name` unit with the same complete visible source name. Mark both a hardcoded `nbt.CustomName` predicate literal and a matching entity-name producer as `selector_identity_coupled`, set the strategy to `preserve-source-custom-name`, and remove `hybrid-key-injection` and `embedded-direct` from those rows.
+
+Do not treat `tag`, `type`, `scores`, `predicate`, distance, coordinates, UUIDs, or other selector arguments as translatable text. They are stable logic. Dynamic `$(name)` references and static names with no scanned producer must remain explicit review/runtime-test findings; never guess their target from wording alone.
+
+Preserving the source name is the safe default because changing only the entity, only the selector, or converting one side to a `translate` component can make selection language-dependent or structurally unequal. To localize such a visible NPC name, first migrate every selector and producer to a stable entity tag using exact anchors, then test fresh-save spawn, lookup, exclusion, reload, and quest paths. The current bundled tool intentionally does not perform that semantic migration automatically.
+
 ## Do Not Translate
 
 - Command names and syntax.
-- Selectors such as `@p`, `@a`, `@e`, `@s`, selector arguments, and target tags unless visibly player-facing.
+- Selector syntax such as `@p`, `@a`, `@e`, `@s` and logic arguments including `tag`, `type`, `scores`, and `predicate`. A visible `name=` or `nbt.CustomName` value is identity-coupled and must follow the preservation rule above, not ordinary translation.
 - Minecraft identifiers such as `minecraft:stone`, block IDs, item IDs, entity IDs, sounds, particles, recipes, loot tables, dimensions, predicates, tags, storage paths, and objective IDs.
 - NBT keys and JSON text component field names: `text`, `translate`, `with`, `extra`, `color`, `bold`, `italic`, `clickEvent`, `hoverEvent`, `score`, `selector`, `keybind`, `nbt`.
 - Scoreboard objective internal names. Translate only display names if clearly player-facing.

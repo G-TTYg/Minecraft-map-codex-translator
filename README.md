@@ -21,6 +21,7 @@ It can help with:
 - supported `.dat` NBT and `.mca` region/chunk text;
 - whole sign-face units with four-line context and block-position cross-checks;
 - structure-fingerprinted item names/lore used by villager offers, containers, rewards, `clear`, and item predicates;
+- named-entity safety for static `@e[name=...]`, negated names, and `@e[nbt={CustomName:...}]` across command blocks and datapack functions;
 - residual-English QA after export.
 
 Bedrock Edition is not supported.
@@ -92,7 +93,7 @@ Codex should follow this flow for real maps:
 2. Scan the map into `translation_units.jsonl`.
 3. Create the indexed multi-file project layout.
 4. Read `scan_review.md` and `scan_report.json`.
-5. Review `identity_coupled` rows and record every structurally unparsed item in a reviewed decisions JSON.
+5. Review item `identity_coupled` rows, `identity_review.json`, and `selector_identity.json`; preserve entity names used as `@e` selector identity.
 6. Explain the four export modes and ask which mode to produce.
 7. Build or update `glossary.md`.
 8. Maintain `translation_progress.md` as the persistent TODO list.
@@ -205,6 +206,7 @@ A normal scan creates:
 - `glossary.md`: terminology decisions;
 - `translation_progress.md`: persistent TODO list;
 - `identity_review.json`: scanner-generated unresolved-item review template and decisions file;
+- `selector_identity.json`: exact named-entity selector references, match counts, and dynamic/unmatched review items;
 - `index/manifest.json`: entry point for staged translation;
 - `index/*.jsonl`: compact searchable indexes;
 - `context/source-summaries/*.md`: source-level summaries;
@@ -213,7 +215,7 @@ A normal scan creates:
 - `translations/translations.jsonl`: merged canonical translation file;
 - `exports/`: generated resource packs and copied map outputs;
 - `qa/`: residual-English audits and QA reports;
-- `qa/identity_qa.json`: item structure, canonical-key, unresolved-identity, and producer/consumer relationship QA;
+- `qa/identity_qa.json`: item structure/canonical-key/producer-consumer QA plus selector-coupled entity-name hard gates;
 - `exports/DELIVERY.md`: the exact mode and single canonical artifact users should install/play.
 
 ## Translation Quality Rules
@@ -227,6 +229,8 @@ Codex should:
 - never count `translation == raw` as reviewed unless `review_status` is `intentional_name`, `code`, `ascii_art`, or `puzzle_token` and `review_reason` explains why;
 - keep scanner-generated canonical keys for structurally resolved `identity_coupled` item name/lore slots;
 - never merge unresolved item text merely because its visible wording matches; use `resolve-item-identities` with reviewed evidence instead;
+- keep `selector_identity_coupled` entity names and NBT selector literals source-equal with an `intentional_name` reason; never re-enable Hybrid/Direct patch modes for them;
+- never translate selector logic such as `tag`, `type`, `scores`, or `predicate`; to localize a protected visible NPC name, migrate all name-based logic to stable entity tags first and test the map behavior;
 - preserve escape semantics such as real newlines versus literal `\\n`;
 - treat UTF-8 and multilingual text carefully, especially on Windows terminals;
 - report uncovered text honestly instead of claiming false coverage.
@@ -239,7 +243,8 @@ Codex should not call external translation APIs, browser translators, or third-p
 - Resource packs cannot translate arbitrary hardcoded literals unless the copied map is patched to use translation keys.
 - PNG textures, custom bitmap fonts, map art, and model textures may contain visual English that requires separate asset localization or manual QA.
 - Direct text replacement is intentionally separate from hybrid key injection because it has a higher risk profile.
-- Static identity QA verifies parsed item ID/components/custom-data structure, text-slot keys, and scanned source/consumer relationships. Dynamic loot, macros, external producers, named-NPC selectors, and every identity-sensitive workflow still need fresh-save in-game tests.
+- Visible entity names used by name/NBT selectors are preserved by default. Fully localizing them requires an explicit map-logic migration to stable tags, which the current tool reports but does not automate.
+- Static identity QA verifies parsed item ID/components/custom-data structure, text-slot keys, scanned source/consumer relationships, and recognized static `@e[name=...]`/NBT `CustomName` coupling. Dynamic loot, macros, external producers, runtime-built selectors, and every identity-sensitive workflow still need fresh-save in-game tests.
 - Visual asset hints use path filtering; OCR or visual inspection is still required to confirm text baked into PNG/font/map-art assets.
 - Parser coverage for unusual binary/NBT forms may be reported as pending rather than guessed.
 

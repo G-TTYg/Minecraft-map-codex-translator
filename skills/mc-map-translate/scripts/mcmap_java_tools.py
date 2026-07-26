@@ -1551,6 +1551,340 @@ def row_command_identity_span(row: dict[str, Any]) -> tuple[int, int] | None:
     return None
 
 
+def top_level_delimited_spans(text: str, start: int, end: int, delimiter: str = ",") -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    token_start = start
+    stack: list[str] = []
+    quote = ""
+    escaped = False
+    pairs = {"{": "}", "[": "]", "(": ")"}
+    for index in range(start, end):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char in pairs:
+            stack.append(pairs[char])
+        elif stack and char == stack[-1]:
+            stack.pop()
+        elif char == delimiter and not stack:
+            spans.append((token_start, index))
+            token_start = index + 1
+    spans.append((token_start, end))
+    return spans
+
+
+def selector_argument_assignment(text: str, start: int, end: int) -> tuple[str, int, int] | None:
+    stack: list[str] = []
+    quote = ""
+    escaped = False
+    pairs = {"{": "}", "[": "]", "(": ")"}
+    for index in range(start, end):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char in pairs:
+            stack.append(pairs[char])
+        elif stack and char == stack[-1]:
+            stack.pop()
+        elif char == "=" and not stack:
+            key = text[start:index].strip().lower()
+            return key, index + 1, end
+    return None
+
+
+def iter_entity_selector_spans(text: str) -> Iterable[tuple[int, int, int, int]]:
+    """Yield @e selector and argument-body spans, including selectors in JSON components."""
+    index = 0
+    while index < len(text):
+        start = text.find("@e", index)
+        if start < 0:
+            break
+        if start > 0 and (text[start - 1].isalnum() or text[start - 1] == "_"):
+            index = start + 2
+            continue
+        cursor = start + 2
+        if cursor >= len(text) or text[cursor] != "[":
+            index = cursor
+            continue
+        body_start = cursor + 1
+        stack = ["]"]
+        quote = ""
+        escaped = False
+        cursor += 1
+        while cursor < len(text) and stack:
+            char = text[cursor]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+            elif char in {"'", '"'}:
+                quote = char
+            elif char == "[":
+                stack.append("]")
+            elif char == "{":
+                stack.append("}")
+            elif char == "(":
+                stack.append(")")
+            elif stack and char == stack[-1]:
+                stack.pop()
+            cursor += 1
+        if stack:
+            index = start + 2
+            continue
+        yield start, cursor, body_start, cursor - 1
+        index = cursor
+
+
+def parse_selector_name_value(raw: str) -> tuple[str, bool, bool]:
+    value = raw.strip()
+    negated = value.startswith("!")
+    if negated:
+        value = value[1:].lstrip()
+    dynamic = "$(" in value or "${" in value
+    if value[:1] in {"'", '"'}:
+        try:
+            node = SnbtParser(value).parse()
+            if node.scalar_type == "string":
+                value = str(node.value)
+        except ValueError:
+            pass
+    return value, negated, dynamic
+
+
+def component_visible_text(value: str) -> tuple[str, list[str]]:
+    stripped = value.strip()
+    try:
+        obj = json.loads(stripped)
+    except json.JSONDecodeError:
+        return value, []
+    if isinstance(obj, str):
+        return obj, []
+    nodes = collect_all_component_text_nodes(obj)
+    translate_keys = collect_component_context(obj).get("translate_keys", []) if isinstance(obj, (dict, list)) else []
+    return "".join(str(node.get("text", "")) for node in nodes), [
+        str(item.get("key", "")) for item in translate_keys if isinstance(item, dict) and item.get("key")
+    ]
+
+
+def snbt_custom_name_values(node: SnbtNode) -> list[tuple[str, list[str], tuple[int, int]]]:
+    values: list[tuple[str, list[str], tuple[int, int]]] = []
+
+    def visit(current: SnbtNode) -> None:
+        if current.kind == "compound":
+            for key, child in current.value:
+                if str(key).lower().replace("_", "") == "customname" and child.scalar_type == "string":
+                    name, translate_keys = component_visible_text(str(child.value))
+                    values.append((name, translate_keys, (child.start, child.end)))
+                visit(child)
+        elif current.kind == "list":
+            for child in current.value:
+                visit(child)
+
+    visit(node)
+    return values
+
+
+def selector_identity_references(
+    line: str,
+    *,
+    source_file: str,
+    base_address: dict[str, Any],
+) -> list[dict[str, Any]]:
+    references: list[dict[str, Any]] = []
+    for selector_start, selector_end, body_start, body_end in iter_entity_selector_spans(line):
+        selector_text = line[selector_start:selector_end]
+        for argument_start, argument_end in top_level_delimited_spans(line, body_start, body_end):
+            assignment = selector_argument_assignment(line, argument_start, argument_end)
+            if assignment is None:
+                continue
+            key, value_start, value_end = assignment
+            raw_value = line[value_start:value_end]
+            if key == "name":
+                name, negated, dynamic = parse_selector_name_value(raw_value)
+                references.append(
+                    {
+                        "reference_id": stable_id(source_file, json.dumps(base_address, sort_keys=True), str(selector_start), "name", name),
+                        "source_file": source_file,
+                        "address": dict(base_address),
+                        "selector": selector_text,
+                        "selector_span": [selector_start, selector_end],
+                        "argument": "name",
+                        "match_kind": "name",
+                        "name": name,
+                        "negated": negated,
+                        "dynamic": dynamic,
+                    }
+                )
+            elif key == "nbt" and raw_value.lstrip().lstrip("!").lstrip().startswith("{"):
+                leading = raw_value.lstrip()
+                negated = leading.startswith("!")
+                if negated:
+                    leading = leading[1:].lstrip()
+                value_offset = line.find(leading, value_start, value_end)
+                try:
+                    node = SnbtParser(line, value_offset).parse()
+                except ValueError:
+                    continue
+                for name, translate_keys, custom_name_span in snbt_custom_name_values(node):
+                    references.append(
+                        {
+                            "reference_id": stable_id(source_file, json.dumps(base_address, sort_keys=True), str(selector_start), "nbt.CustomName", name, str(custom_name_span)),
+                            "source_file": source_file,
+                            "address": dict(base_address),
+                            "selector": selector_text,
+                            "selector_span": [selector_start, selector_end],
+                            "argument": "nbt",
+                            "match_kind": "nbt_custom_name",
+                            "name": name,
+                            "translate_keys": translate_keys,
+                            "custom_name_span": [custom_name_span[0], custom_name_span[1]],
+                            "negated": negated,
+                            "dynamic": "$(" in raw_value or "${" in raw_value,
+                        }
+                    )
+    return references
+
+
+def json_selector_identity_references(
+    obj: Any,
+    *,
+    source_file: str,
+    base_address: dict[str, Any],
+    json_path: str = "$",
+) -> list[dict[str, Any]]:
+    references: list[dict[str, Any]] = []
+
+    def visit(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            selector = value.get("selector")
+            if isinstance(selector, str):
+                references.extend(
+                    selector_identity_references(
+                        selector,
+                        source_file=source_file,
+                        base_address={**base_address, "component_selector_path": f"{path}.selector"},
+                    )
+                )
+            for key, child in value.items():
+                visit(child, f"{path}.{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, f"{path}[{index}]")
+
+    visit(obj, json_path)
+    return references
+
+
+def protect_selector_logic_rows(rows: list[dict[str, Any]], references: list[dict[str, Any]]) -> None:
+    predicate_spans = [
+        tuple(reference["custom_name_span"])
+        for reference in references
+        if reference.get("match_kind") == "nbt_custom_name"
+        and isinstance(reference.get("custom_name_span"), list)
+        and len(reference["custom_name_span"]) == 2
+    ]
+    for row in rows:
+        span = row_command_identity_span(row)
+        if span is None or not any(start <= span[0] and span[1] <= end for start, end in predicate_spans):
+            continue
+        patch_modes = {"hybrid-key-injection", "embedded-direct"}.intersection(row.get("mode_support", []))
+        if not patch_modes:
+            continue
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        context["selector_identity_coupled"] = True
+        context["selector_identity_role"] = "selector_predicate_literal"
+        context["selector_identity_strategy"] = "preserve-source-custom-name"
+        context["selector_references"] = [
+            reference
+            for reference in references
+            if reference.get("match_kind") == "nbt_custom_name"
+            and isinstance(reference.get("custom_name_span"), list)
+            and reference["custom_name_span"][0] <= span[0]
+            and span[1] <= reference["custom_name_span"][1]
+        ]
+        row["context"] = context
+        row["mode_support"] = [mode for mode in row.get("mode_support", []) if mode not in patch_modes]
+
+
+def couple_selector_entity_names(rows: list[dict[str, Any]], references: list[dict[str, Any]]) -> dict[str, Any]:
+    matched_reference_ids: set[str] = set()
+    protected_unit_ids: set[str] = set()
+    static_references = [reference for reference in references if reference.get("name") and not reference.get("dynamic")]
+    by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for reference in static_references:
+        by_name[str(reference.get("name", ""))].append(reference)
+
+    for row in rows:
+        if str(row.get("source_kind", "")) != "entity_name":
+            continue
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        if context.get("selector_identity_role") == "selector_predicate_literal":
+            continue
+        row_references = by_name.get(str(row.get("raw", "")), [])
+        if not row_references:
+            continue
+        context["selector_identity_coupled"] = True
+        context["selector_identity_role"] = "entity_custom_name"
+        context["selector_identity_strategy"] = "preserve-source-custom-name"
+        context["selector_references"] = row_references
+        row["context"] = context
+        row["mode_support"] = [
+            mode for mode in row.get("mode_support", []) if mode not in {"hybrid-key-injection", "embedded-direct"}
+        ]
+        protected_unit_ids.add(str(row.get("id", "")))
+        matched_reference_ids.update(str(reference.get("reference_id", "")) for reference in row_references)
+
+    for row in rows:
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        if context.get("selector_identity_role") == "selector_predicate_literal":
+            protected_unit_ids.add(str(row.get("id", "")))
+            matched_reference_ids.update(
+                str(reference.get("reference_id", ""))
+                for reference in context.get("selector_references", [])
+                if isinstance(reference, dict)
+            )
+
+    unmatched = [
+        reference
+        for reference in static_references
+        if str(reference.get("reference_id", "")) not in matched_reference_ids
+    ]
+    dynamic = [reference for reference in references if reference.get("dynamic")]
+    return {
+        "reference_count": len(references),
+        "name_reference_count": sum(1 for reference in references if reference.get("match_kind") == "name"),
+        "nbt_custom_name_reference_count": sum(
+            1 for reference in references if reference.get("match_kind") == "nbt_custom_name"
+        ),
+        "matched_reference_count": len(matched_reference_ids),
+        "unmatched_reference_count": len(unmatched),
+        "dynamic_reference_count": len(dynamic),
+        "protected_unit_count": len(protected_unit_ids),
+        "unmatched_references": unmatched[:200],
+        "dynamic_references": dynamic[:200],
+        "scope_note": "Only @e name= and nbt={CustomName:...} are identity-coupled. tag/type/scores/predicate and other stable selector arguments are never translated.",
+    }
+
+
 def attach_command_item_identities(rows: list[dict[str, Any]], line: str) -> None:
     descriptors = command_item_identity_descriptors(line)
     for row in rows:
@@ -2220,8 +2554,16 @@ def scan_command_line(
     map_slug: str,
     fallback_kind: str,
     confidence: str,
+    selector_references: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     units: list[dict[str, Any]] = []
+    line_selector_references = selector_identity_references(
+        line,
+        source_file=source_file,
+        base_address=base_address,
+    )
+    if selector_references is not None:
+        selector_references.extend(line_selector_references)
     source_kind = infer_command_source_kind(line, fallback_kind)
     direct_component_spans: list[tuple[int, int]] = []
     for start, end, obj in iter_json_spans(line):
@@ -2336,6 +2678,7 @@ def scan_command_line(
             context["identity_command"] = identity_command
             row["context"] = context
     attach_command_item_identities(units, line)
+    protect_selector_logic_rows(units, line_selector_references)
     for row in units:
         if str(row.get("source_kind", "")) in IDENTITY_COUPLED_SOURCE_KINDS:
             continue
@@ -2362,6 +2705,7 @@ def scan_mcfunction(
     counters: Counter[str] | None = None,
     suspicious_hints: list[dict[str, Any]] | None = None,
     function_calls: list[dict[str, Any]] | None = None,
+    selector_references: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if entry.data is None:
         return []
@@ -2402,6 +2746,7 @@ def scan_mcfunction(
             map_slug=map_slug,
             fallback_kind="function",
             confidence="high",
+            selector_references=selector_references,
         )
         if line_units:
             for row in line_units:
@@ -2570,6 +2915,7 @@ def scan_json_file(
     map_slug: str,
     *,
     suspicious_hints: list[dict[str, Any]] | None = None,
+    selector_references: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if entry.data is None or LANG_PATH_RE.match(entry.path):
         return []
@@ -2583,6 +2929,25 @@ def scan_json_file(
         obj = json.loads(text)
     except json.JSONDecodeError:
         return []
+    if selector_references is not None:
+        selector_references.extend(
+            json_selector_identity_references(
+                obj,
+                source_file=entry.path,
+                base_address={},
+            )
+        )
+        for json_string_path, value in iter_json_strings(obj):
+            component = parse_component_string(value)
+            if component is None:
+                continue
+            selector_references.extend(
+                json_selector_identity_references(
+                    component,
+                    source_file=entry.path,
+                    base_address={"json_string_path": json_string_path},
+                )
+            )
     units = extract_text_components(
         obj,
         source_file=entry.path,
@@ -3072,6 +3437,7 @@ def build_sign_group_unit(
     base_path: str,
     namespace: str,
     map_slug: str,
+    selector_references: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, set[str]]:
     line_texts = ["", "", "", ""]
     text_nodes: list[dict[str, str]] = []
@@ -3085,6 +3451,14 @@ def build_sign_group_unit(
         obj = parse_component_string(item.value)
         if obj is None:
             continue
+        if selector_references is not None:
+            selector_references.extend(
+                json_selector_identity_references(
+                    obj,
+                    source_file=source_file,
+                    base_address={"nbt_path": item.path},
+                )
+            )
         component_nodes = collect_all_component_text_nodes(obj, "$")
         grouped_paths.add(item.path)
         sign_lines.append({"line_index": line_index, "nbt_path": item.path, "json_path": "$"})
@@ -3159,6 +3533,7 @@ def scan_nbt_value(
     map_slug: str,
     include_last_output: bool = False,
     counters: Counter[str] | None = None,
+    selector_references: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     value = item.value
     if nbt_path_is_last_output(item.path) and not include_last_output:
@@ -3185,6 +3560,7 @@ def scan_nbt_value(
                 map_slug=map_slug,
                 fallback_kind=source_kind,
                 confidence="medium",
+                selector_references=selector_references,
             )
         )
         attach_item_identity_metadata(units, item.item_identity, source_path=item.path)
@@ -3197,6 +3573,14 @@ def scan_nbt_value(
         except json.JSONDecodeError:
             obj = None
         if obj is not None:
+            if selector_references is not None:
+                selector_references.extend(
+                    json_selector_identity_references(
+                        obj,
+                        source_file=source_file,
+                        base_address=base_address,
+                    )
+                )
             units.extend(
                 extract_text_components(
                     obj,
@@ -3241,6 +3625,7 @@ def scan_nbt_items(
     map_slug: str,
     include_last_output: bool,
     counters: Counter[str],
+    selector_references: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     units: list[dict[str, Any]] = []
     sign_groups: dict[tuple[str, str], list[tuple[int, NbtString]]] = defaultdict(list)
@@ -3261,6 +3646,7 @@ def scan_nbt_items(
             base_path=base_path,
             namespace=namespace,
             map_slug=map_slug,
+            selector_references=selector_references,
         )
         if unit is not None:
             units.append(unit)
@@ -3280,6 +3666,7 @@ def scan_nbt_items(
                 map_slug=map_slug,
                 include_last_output=include_last_output,
                 counters=counters,
+                selector_references=selector_references,
             )
         )
     return units
@@ -3292,6 +3679,7 @@ def scan_binary_entry(
     *,
     include_last_output: bool,
     counters: Counter[str],
+    selector_references: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if entry.data is None:
         return [], [f"{entry.path}: no data"]
@@ -3310,6 +3698,7 @@ def scan_binary_entry(
                     map_slug=map_slug,
                     include_last_output=include_last_output,
                     counters=counters,
+                    selector_references=selector_references,
                 )
             )
         except Exception as exc:
@@ -3329,6 +3718,7 @@ def scan_binary_entry(
                         map_slug=map_slug,
                         include_last_output=include_last_output,
                         counters=counters,
+                        selector_references=selector_references,
                     )
                 )
             except Exception as exc:
@@ -3485,6 +3875,8 @@ def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, A
         f"- Sign faces without player text: {report.get('discovery_counters', {}).get('sign_faces_without_player_text', 0)}",
         f"- Identity-coupled units/groups: {report.get('identity_coupled', {}).get('unit_count', 0)}/{report.get('identity_coupled', {}).get('group_count', 0)}",
         f"- Structurally resolved/unresolved identity groups or units: {report.get('identity_coupled', {}).get('structural_group_count', 0)}/{report.get('identity_coupled', {}).get('unresolved_unit_count', 0)}",
+        f"- Named-entity selector references/protected units: {report.get('selector_identity', {}).get('reference_count', 0)}/{report.get('selector_identity', {}).get('protected_unit_count', 0)}",
+        f"- Unmatched/dynamic named-entity selector references: {report.get('selector_identity', {}).get('unmatched_reference_count', 0)}/{report.get('selector_identity', {}).get('dynamic_reference_count', 0)}",
         f"- Macro function lines: {report.get('discovery_counters', {}).get('macro_function_lines', 0)}",
         f"- Function calls: {report.get('function_call_count', 0)}",
         f"- Suspicious text hints: {report.get('suspicious_text_hint_count', 0)}",
@@ -3613,6 +4005,7 @@ def scan_source(args: argparse.Namespace) -> int:
     map_resource_packs: list[dict[str, Any]] = []
     suspicious_text_hints: list[dict[str, Any]] = []
     function_calls: list[dict[str, Any]] = []
+    selector_references: list[dict[str, Any]] = []
 
     for entry in iter_entries(source):
         scanned_files += 1
@@ -3639,10 +4032,19 @@ def scan_source(args: argparse.Namespace) -> int:
                         counters=discovery_counters,
                         suspicious_hints=suspicious_text_hints,
                         function_calls=function_calls,
+                        selector_references=selector_references,
                     )
                 )
             elif lowered.endswith(".json"):
-                units.extend(scan_json_file(entry, namespace, map_slug, suspicious_hints=suspicious_text_hints))
+                units.extend(
+                    scan_json_file(
+                        entry,
+                        namespace,
+                        map_slug,
+                        suspicious_hints=suspicious_text_hints,
+                        selector_references=selector_references,
+                    )
+                )
             elif is_binary_world_data(entry.path):
                 if args.no_binary:
                     pending_binary.append(entry.path)
@@ -3654,6 +4056,7 @@ def scan_source(args: argparse.Namespace) -> int:
                         map_slug,
                         include_last_output=args.include_last_output,
                         counters=discovery_counters,
+                        selector_references=selector_references,
                     )
                     units.extend(binary_found)
                     binary_units += len(units) - before
@@ -3663,6 +4066,23 @@ def scan_source(args: argparse.Namespace) -> int:
         except Exception as exc:
             warnings.append(f"{entry.path}: {exc}")
 
+    selector_references = list(
+        {
+            str(reference.get("reference_id", "")): reference
+            for reference in selector_references
+            if reference.get("reference_id")
+        }.values()
+    )
+    selector_identity_summary = couple_selector_entity_names(units, selector_references)
+    selector_identity_path = out / "selector_identity.json"
+    write_json(
+        selector_identity_path,
+        {
+            "schema": "mc-map-selector-identity.v1",
+            "summary": selector_identity_summary,
+            "references": selector_references,
+        },
+    )
     identity_summary = canonicalize_identity_keys(units, namespace, map_slug)
     unit_path = out / "translation_units.jsonl"
     write_jsonl(unit_path, units)
@@ -3728,6 +4148,8 @@ def scan_source(args: argparse.Namespace) -> int:
         "map_resource_pack_count": len(map_resource_packs),
         "identity_coupled": identity_summary,
         "identity_review_file": str(identity_review_path),
+        "selector_identity": selector_identity_summary,
+        "selector_identity_file": str(selector_identity_path),
         "direct_only_unit_count": sum(
             1
             for row in units
@@ -3776,6 +4198,8 @@ def scan_source(args: argparse.Namespace) -> int:
     print(f"units: {unit_path}")
     print(f"unit_count: {len(units)}")
     print(f"binary_unit_count: {binary_units}")
+    print(f"selector_identity: {selector_identity_path}")
+    print(f"selector_identity_references: {selector_identity_summary['reference_count']}")
     print(f"pending_binary_parser_coverage: {len(set(pending_binary))}")
     return 0
 
@@ -5749,6 +6173,7 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
                 f"{identity_qa['conflict_count']} identity conflict(s)",
                 f"{identity_qa['unresolved_count']} unresolved identity unit(s)",
                 f"{identity_qa['relationship_gap_count']} identity relationship gap(s)",
+                f"{identity_qa['selector_identity_conflict_count']} selector identity conflict(s)",
             ],
             "hybrid apply blocked by identity QA",
         )
@@ -5866,6 +6291,7 @@ def apply_direct_nbt_strings(args: argparse.Namespace) -> int:
                 f"{identity_qa['conflict_count']} identity conflict(s)",
                 f"{identity_qa['unresolved_count']} unresolved identity unit(s)",
                 f"{identity_qa['relationship_gap_count']} identity relationship gap(s)",
+                f"{identity_qa['selector_identity_conflict_count']} selector identity conflict(s)",
             ],
             "direct text apply blocked by identity QA",
         )

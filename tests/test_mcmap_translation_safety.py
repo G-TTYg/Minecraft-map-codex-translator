@@ -108,6 +108,27 @@ def sign_fixture_payload() -> bytes:
     return java_tools.write_nbt_tree(tree)
 
 
+def named_entity_selector_fixture_payload() -> bytes:
+    custom_name = json.dumps({"text": "Guide"}, separators=(",", ":"))
+    blocks = [
+        compound_pairs(
+            ("id", string_tag("minecraft:armor_stand")),
+            ("CustomName", string_tag(custom_name)),
+        ),
+        compound_pairs(
+            ("id", string_tag("minecraft:command_block")),
+            ("Command", string_tag('execute as @e[name="Guide"] run say Welcome')),
+        ),
+    ]
+    return java_tools.write_nbt_tree(
+        java_tools.NbtTree(
+            10,
+            "",
+            compound_pairs(("block_entities", java_tools.NbtTag(9, (10, blocks)))),
+        )
+    )
+
+
 class ScannerSafetyTests(unittest.TestCase):
     def test_sign_faces_always_group_and_keep_coordinates(self) -> None:
         counters: Counter[str] = Counter()
@@ -151,6 +172,133 @@ class ScannerSafetyTests(unittest.TestCase):
         self.assertTrue(all(row["context"]["identity_coupled"] for row in rows))
         self.assertEqual("trade_input", rows[0]["context"]["identity_role"])
         self.assertEqual("container", rows[1]["context"]["identity_role"])
+
+    def test_named_entity_selector_protects_matching_custom_name(self) -> None:
+        references: list[dict[str, object]] = []
+        rows = java_tools.scan_nbt_items(
+            java_tools.scan_nbt_strings(named_entity_selector_fixture_payload()),
+            source_file="region/r.0.0.mca",
+            namespace="mcmap",
+            map_slug="fixture",
+            include_last_output=False,
+            counters=Counter(),
+            selector_references=references,
+        )
+        summary = java_tools.couple_selector_entity_names(rows, references)
+        entity = next(row for row in rows if row["source_kind"] == "entity_name")
+
+        self.assertEqual(1, summary["name_reference_count"])
+        self.assertEqual(1, summary["matched_reference_count"])
+        self.assertTrue(entity["context"]["selector_identity_coupled"])
+        self.assertEqual("entity_custom_name", entity["context"]["selector_identity_role"])
+        self.assertNotIn("hybrid-key-injection", entity["mode_support"])
+        self.assertNotIn("embedded-direct", entity["mode_support"])
+
+    def test_selector_parser_handles_negation_nbt_macros_and_ignores_stable_arguments(self) -> None:
+        lines = [
+            '@e[name=!"Guide"]',
+            "@e[nbt={CustomName:'{\"text\":\"Guide\"}'}]",
+            "@e[name=$(npc_name)]",
+            "@e[tag=guide,type=minecraft:armor_stand,scores={quest=1},predicate=map:ready]",
+        ]
+        references = [
+            reference
+            for index, line in enumerate(lines)
+            for reference in java_tools.selector_identity_references(
+                line,
+                source_file="data/map/functions/test.mcfunction",
+                base_address={"function_line": index + 1},
+            )
+        ]
+
+        self.assertEqual(3, len(references))
+        self.assertTrue(references[0]["negated"])
+        self.assertEqual("Guide", references[0]["name"])
+        self.assertEqual("nbt_custom_name", references[1]["match_kind"])
+        self.assertEqual("Guide", references[1]["name"])
+        self.assertTrue(references[2]["dynamic"])
+
+    def test_nbt_custom_name_selector_literal_is_not_patchable(self) -> None:
+        references: list[dict[str, object]] = []
+        rows = java_tools.scan_command_line(
+            "execute as @e[nbt={CustomName:'{\"text\":\"Guide\"}'}] run say Welcome",
+            source_file="data/map/functions/test.mcfunction",
+            base_address={"function_line": 1},
+            namespace="mcmap",
+            map_slug="fixture",
+            fallback_kind="function",
+            confidence="high",
+            selector_references=references,
+        )
+        protected = [
+            row
+            for row in rows
+            if row.get("context", {}).get("selector_identity_role") == "selector_predicate_literal"
+        ]
+
+        self.assertEqual(1, len(protected))
+        self.assertEqual([], protected[0]["mode_support"])
+        self.assertTrue(any(row["raw"] == "Welcome" for row in rows))
+
+    def test_datapack_json_component_selector_is_indexed(self) -> None:
+        payload = json.dumps(
+            {"text": "Following: ", "extra": [{"selector": "@e[name=Guide]"}]},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        entry = java_tools.Entry(
+            "datapacks/map/data/map/dialogue/guide.json",
+            payload,
+            len(payload),
+        )
+        references: list[dict[str, object]] = []
+
+        rows = java_tools.scan_json_file(
+            entry,
+            "mcmap",
+            "fixture",
+            selector_references=references,
+        )
+
+        self.assertEqual(1, len(rows))
+        self.assertEqual(1, len(references))
+        self.assertEqual("Guide", references[0]["name"])
+        self.assertEqual("$.extra[0].selector", references[0]["address"]["component_selector_path"])
+
+    def test_full_scan_writes_selector_identity_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            world = root / "world"
+            data_dir = world / "data"
+            data_dir.mkdir(parents=True)
+            (world / "level.dat").write_bytes(
+                java_tools.write_nbt_tree(java_tools.NbtTree(10, "", compound()))
+            )
+            (data_dir / "entities.dat").write_bytes(named_entity_selector_fixture_payload())
+            out = root / "work"
+            args = argparse.Namespace(
+                source=str(world),
+                out=str(out),
+                target="zh_cn",
+                source_locale="en_us",
+                map_slug="fixture",
+                namespace="mcmap",
+                mode="resource-pack",
+                no_binary=False,
+                include_last_output=False,
+                max_binary_errors=50,
+                project_layout=False,
+                max_workpack_units=120,
+                no_prepare_segments=False,
+            )
+
+            self.assertEqual(0, java_tools.scan_source(args))
+            artifact = json.loads((out / "selector_identity.json").read_text(encoding="utf-8"))
+            rows = contract.read_jsonl(out / "translation_units.jsonl")
+            entity = next(row for row in rows if row["source_kind"] == "entity_name")
+
+            self.assertEqual(1, artifact["summary"]["reference_count"])
+            self.assertEqual(1, artifact["summary"]["protected_unit_count"])
+            self.assertEqual([], entity["mode_support"])
 
     def test_same_name_with_different_custom_data_is_not_merged(self) -> None:
         rows = java_tools.scan_nbt_items(
@@ -504,6 +652,93 @@ class TranslationContractTests(unittest.TestCase):
             )
         report = contract.identity_consistency_report(rows)
         self.assertEqual(1, report["conflict_count"])
+
+    def test_identity_qa_blocks_selector_coupled_custom_name_translation(self) -> None:
+        references: list[dict[str, object]] = []
+        rows = java_tools.scan_nbt_items(
+            java_tools.scan_nbt_strings(named_entity_selector_fixture_payload()),
+            source_file="region/r.0.0.mca",
+            namespace="mcmap",
+            map_slug="fixture",
+            include_last_output=False,
+            counters=Counter(),
+            selector_references=references,
+        )
+        java_tools.couple_selector_entity_names(rows, references)
+        entity = next(row for row in rows if row["source_kind"] == "entity_name")
+        entity["translation"] = "向导"
+        entity["review_status"] = "translated"
+
+        report = contract.identity_consistency_report(rows)
+
+        self.assertEqual(1, report["selector_identity_conflict_count"])
+        self.assertGreater(report["blocking_count"], 0)
+
+    def test_identity_qa_accepts_reviewed_preserved_selector_custom_name(self) -> None:
+        references: list[dict[str, object]] = []
+        rows = java_tools.scan_nbt_items(
+            java_tools.scan_nbt_strings(named_entity_selector_fixture_payload()),
+            source_file="region/r.0.0.mca",
+            namespace="mcmap",
+            map_slug="fixture",
+            include_last_output=False,
+            counters=Counter(),
+            selector_references=references,
+        )
+        java_tools.couple_selector_entity_names(rows, references)
+        entity = next(row for row in rows if row["source_kind"] == "entity_name")
+        entity["translation"] = entity["raw"]
+        entity["review_status"] = "intentional_name"
+        entity["review_reason"] = "Preserved because @e[name=Guide] uses this CustomName as entity identity."
+
+        report = contract.identity_consistency_report(rows)
+
+        self.assertEqual(0, report["selector_identity_conflict_count"])
+
+    def test_hybrid_apply_refuses_selector_coupled_custom_name_translation(self) -> None:
+        references: list[dict[str, object]] = []
+        rows = java_tools.scan_nbt_items(
+            java_tools.scan_nbt_strings(named_entity_selector_fixture_payload()),
+            source_file="data/entities.dat",
+            namespace="mcmap",
+            map_slug="fixture",
+            include_last_output=False,
+            counters=Counter(),
+            selector_references=references,
+        )
+        java_tools.couple_selector_entity_names(rows, references)
+        entity = next(row for row in rows if row["source_kind"] == "entity_name")
+        entity["translation"] = "向导"
+        entity["review_status"] = "translated"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            world = root / "world"
+            world.mkdir()
+            (world / "level.dat").write_bytes(b"fixture")
+            translations = root / "translations.jsonl"
+            java_tools.write_jsonl(translations, rows)
+            out = root / "blocked-output"
+            args = argparse.Namespace(
+                source=str(world),
+                out=str(out),
+                translations=str(translations),
+                resource_pack="",
+                allow_separate_resource_pack=False,
+                multi_text_mode="split-nodes",
+                min_confidence="medium",
+                source_kind="",
+                unit_id="",
+                translated_only=True,
+                dry_run=False,
+                report="",
+                allow_no_changes=True,
+                force=False,
+                replace_existing_resource_pack=False,
+            )
+
+            self.assertEqual(1, java_tools.apply_hybrid_keys(args))
+            self.assertFalse(out.exists())
 
     def test_identity_qa_requires_source_for_trade_input(self) -> None:
         rows = java_tools.scan_nbt_items(

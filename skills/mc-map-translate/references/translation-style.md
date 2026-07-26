@@ -48,6 +48,7 @@ If a term appears in lore and gameplay instructions, choose one translation that
 - Treat backslash escapes such as `\n`, `\t`, `\"`, `\\`, and `\uXXXX` as protected syntax until proven to be ordinary prose. Do not double-escape them and do not let a spreadsheet, shell, or model rewrite turn them into another layer.
 - Preserve JSON text component styling and events.
 - For structurally resolved `context.identity_coupled` rows, use one translation across each item-fingerprint/text-slot group and preserve its canonical unit/segment keys. A currency, quest key, named reward, or trade item may be compared by full component structure; equal visible wording with different generated keys can break gameplay, while equal wording on different fingerprints may represent intentionally different items.
+- For `context.selector_identity_coupled` rows, do not localize the visible entity name or selector-side NBT literal. Preserve the source in the unit and every segment, use `review_status: intentional_name`, and cite the `@e[name=...]` or `@e[nbt={CustomName:...}]` dependency in `review_reason`. Translating both sides is not an approved shortcut because component structure and server-side name resolution can still differ.
 
 ## Multilingual Encoding
 

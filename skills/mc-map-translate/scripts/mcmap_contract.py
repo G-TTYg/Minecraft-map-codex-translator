@@ -699,10 +699,61 @@ def identity_consistency_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if len(fingerprints) > 1
     ]
 
-    blocking_count = len(conflicts) + len(unresolved) + len(relationship_gaps)
+    selector_units: list[dict[str, Any]] = []
+    selector_conflicts: list[dict[str, Any]] = []
+    for row in rows:
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        if not context.get("selector_identity_coupled"):
+            continue
+        changed_fields: list[str] = []
+        translation = str(row.get("translation", ""))
+        if translation.strip() and translation != str(row.get("raw", "")):
+            changed_fields.append("translation")
+        for offset, segment in enumerate(segment_entries(row)):
+            segment_translation = str(segment.get("translation", ""))
+            if segment_translation.strip() and segment_translation != str(segment.get("raw", "")):
+                changed_fields.append(f"segments[{offset}].translation")
+        forbidden_modes = sorted(
+            {"hybrid-key-injection", "embedded-direct"}.intersection(
+                str(mode) for mode in row.get("mode_support", [])
+            )
+        )
+        references = [
+            reference
+            for reference in context.get("selector_references", [])
+            if isinstance(reference, dict)
+        ]
+        summary = {
+            "unit_id": str(row.get("id", "")),
+            "source_kind": str(row.get("source_kind", "")),
+            "source_file": str(row.get("source_file", "")),
+            "raw": str(row.get("raw", "")),
+            "role": str(context.get("selector_identity_role", "")),
+            "strategy": str(context.get("selector_identity_strategy", "")),
+            "reference_ids": sorted(
+                str(reference.get("reference_id", "")) for reference in references if reference.get("reference_id")
+            ),
+            "selectors": sorted(
+                {str(reference.get("selector", "")) for reference in references if reference.get("selector")}
+            ),
+            "changed_fields": changed_fields,
+            "forbidden_modes": forbidden_modes,
+        }
+        selector_units.append(summary)
+        reasons: list[str] = []
+        if changed_fields:
+            reasons.append("selector-coupled CustomName text differs from its source value")
+        if forbidden_modes:
+            reasons.append("selector-coupled CustomName still permits copied-world text patching")
+        if str(context.get("selector_identity_strategy", "")) != "preserve-source-custom-name":
+            reasons.append("selector-coupled CustomName lacks the preserve-source strategy")
+        if reasons:
+            selector_conflicts.append({**summary, "reasons": reasons})
+
+    blocking_count = len(conflicts) + len(unresolved) + len(relationship_gaps) + len(selector_conflicts)
 
     return {
-        "schema": "mc-map-identity-qa.v2",
+        "schema": "mc-map-identity-qa.v3",
         "group_count": len(groups),
         "unit_count": sum(len(group) for group in groups.values()),
         "conflict_count": len(conflicts),
@@ -716,11 +767,16 @@ def identity_consistency_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "relationship_gaps": relationship_gaps,
         "same_text_distinct_item_count": len(same_text_distinct_items),
         "same_text_distinct_items": same_text_distinct_items,
+        "selector_identity_unit_count": len(selector_units),
+        "selector_identity_units": selector_units,
+        "selector_identity_conflict_count": len(selector_conflicts),
+        "selector_identity_conflicts": selector_conflicts,
         "blocking_count": blocking_count,
         "scope_note": (
             "Static QA verifies parsed item structure fingerprints, canonical text-slot keys, and scanned "
-            "producer/container/trade/consumer relationships. It does not replace fresh-save in-game trade, "
-            "clear, predicate, NPC-selector, or quest-item testing."
+            "producer/container/trade/consumer relationships. It also blocks changes to entity CustomName "
+            "values coupled to @e name= or nbt={CustomName:...} selectors. It does not replace fresh-save "
+            "in-game trade, clear, predicate, selector, or quest-item testing."
         ),
     }
 
@@ -751,7 +807,8 @@ def make_resource_pack(args: argparse.Namespace) -> int:
             "identity QA blocked export: "
             f"{identity_qa['conflict_count']} conflict(s), "
             f"{identity_qa['unresolved_count']} unresolved unit(s), and "
-            f"{identity_qa['relationship_gap_count']} producer/consumer relationship gap(s)"
+            f"{identity_qa['relationship_gap_count']} producer/consumer relationship gap(s), and "
+            f"{identity_qa['selector_identity_conflict_count']} selector identity conflict(s)"
         )
     lang_by_namespace: dict[str, dict[str, str]] = {}
     source_by_namespace: dict[str, dict[str, str]] = {}
@@ -1874,6 +1931,8 @@ def write_translation_qa_markdown(path: Path, report: dict[str, Any]) -> None:
         f"- Identity conflicts: {report['identity_qa']['conflict_count']}",
         f"- Unresolved item identities: {report['identity_qa']['unresolved_count']}",
         f"- Identity relationship gaps: {report['identity_qa']['relationship_gap_count']}",
+        f"- Selector-coupled entity names: {report['identity_qa']['selector_identity_unit_count']}",
+        f"- Selector identity conflicts: {report['identity_qa']['selector_identity_conflict_count']}",
         f"- Sign faces: {report['sign_qa']['face_count']}",
         f"- Complete sign faces: {report['sign_qa']['complete_face_count']}",
         "",
@@ -1915,6 +1974,15 @@ def write_translation_qa_markdown(path: Path, report: dict[str, Any]) -> None:
                 f"- `{item.get('identity_item_fingerprint', '')}` "
                 f"items={','.join(item.get('item_ids', []))} "
                 f"required_by={','.join(item.get('required_by_roles', []))}"
+            )
+        lines.append("")
+    if report["identity_qa"].get("selector_identity_conflicts"):
+        lines.extend(["## Selector Identity Conflicts", ""])
+        for item in report["identity_qa"]["selector_identity_conflicts"][:100]:
+            lines.append(
+                f"- `{item.get('unit_id', '')}` `{item.get('source_file', '')}` "
+                f"role={item.get('role', '')} selectors={','.join(item.get('selectors', []))}: "
+                f"{'; '.join(item.get('reasons', []))}"
             )
         lines.append("")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1970,6 +2038,10 @@ def qa_translations(args: argparse.Namespace) -> int:
     if identity_qa["relationship_gap_count"]:
         blocking_reasons.append(
             f"{identity_qa['relationship_gap_count']} consumer/trade-input item(s) lack a structurally equal scanned source"
+        )
+    if identity_qa["selector_identity_conflict_count"]:
+        blocking_reasons.append(
+            f"{identity_qa['selector_identity_conflict_count']} selector-coupled entity name unit(s) would change command identity"
         )
 
     report = {

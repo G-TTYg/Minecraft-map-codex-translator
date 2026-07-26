@@ -37,6 +37,7 @@ Use this reference before apply or export.
 - For aggregated sign units, the four-line `raw` is the translation source of truth. Segment translations should preserve readable sign layout in the target language, not mechanically translate each source line.
 - Every player-text sign face is aggregated, including one-line faces. Compare `sign_faces_seen`, `aggregated_sign_groups`, and `sign_faces_without_player_text`; unexplained isolated sign-line rows or a large aggregation gap is a scanner QA failure.
 - Identity-coupled groups have one canonical unit key and one key per segment slot, plus consistent translations. Any conflict blocks delivery.
+- Selector-coupled entity names and NBT selector literals remain source-equal, have an `intentional_name` reason, and expose neither `hybrid-key-injection` nor `embedded-direct`. Any changed unit/segment or restored copied-world patch mode blocks delivery.
 - Target-language scripts, accents, punctuation width, right-to-left text, emoji, and Minecraft section sign formatting survive scan, edit, merge, export, and apply without corruption.
 - Stiff literal phrasing, context-inconsistent terminology, untranslated player-facing residues, and unexplained skipped difficult text are treated as QA failures.
 
@@ -56,6 +57,7 @@ Report counts by:
 - Aggregated sign groups and segment coverage.
 - Sign faces discovered, aggregated, without player text, complete, changed, no-op, already applied, and skipped.
 - Identity-coupled unit/group counts, repeated groups, role coverage, and key/translation conflicts.
+- `@e[name=...]` and `@e[nbt={CustomName:...}]` reference counts, matched/protected units, unmatched static references, and dynamic macro references from `selector_identity.json`.
 - Residual-English audit findings after export/apply.
 - Datapack function call graph coverage and suspicious text hints reviewed.
 - Player-facing units intentionally left untranslated, with concrete reasons.
@@ -93,16 +95,18 @@ For any world patch, report:
 - different translation keys or translations inside one identity slot group;
 - a `trade_input`, `consumer`, or `predicate` item with no structurally equal scanned `producer`, `container`, or `trade_output`;
 - a manual group or external-source exception without a concrete review reason.
+- an entity name or NBT selector literal marked `selector_identity_coupled` whose translation/segment differs from source, whose preserve-source strategy is missing, or whose copied-world patch modes were re-enabled.
 
 The report also lists equal visible wording found on different item fingerprints. This is diagnostic, not automatically an error: same-named items with different lore/custom data should remain separate.
 
-Static identity QA proves parsed structure and scanned relationships, not runtime behavior. For currencies, quest items, keys, named NPCs, and predicate-driven rewards, also test a fresh save in game:
+Static identity QA proves parsed structure and scanned relationships, not runtime behavior. It protects recognized static `@e[name=...]` and NBT `CustomName` selectors, but cannot resolve arbitrary macros, storage-built commands, plugins, or selectors constructed at runtime. For currencies, quest items, keys, named NPCs, and predicate-driven rewards, also test a fresh save in game:
 
 1. obtain each item from every relevant producer;
 2. use it in each villager trade or menu consumer;
 3. test `clear`, `execute if items`, predicates, quest completion, and rewards;
 4. reload the map and repeat one representative path;
 5. verify similarly named items with different lore/custom data were not merged.
+6. verify each named NPC can still be selected, excluded by negated selectors, triggered, killed/replaced, and found again after reload.
 
 Use `resolve-item-identities` only after reading all referenced anchors and non-text evidence. Approve an external source only for a documented macro/storage/plugin/dynamic-loot path that the scanner cannot materialize. Do not use the exception merely to make QA green.
 

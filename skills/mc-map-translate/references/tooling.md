@@ -31,7 +31,7 @@ The bundled tools do not call external translation services and do not translate
 `scripts/mcmap_java_tools.py`:
 
 - `inspect`: detect Java map/package markers and Bedrock-only markers.
-- `scan`: scan Java resource-pack language JSON, all datapack JSON text components, datapack JSON strings containing text components, `.mcfunction` JSON text components, `execute ... run ...` command chains, command JSON plain strings, quoted command/SNBT JSON text components, plain command messages, storage value strings, whole sign faces, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Sign units retain four-line context and block coordinates when available. Parsed item stacks in NBT, villager offers, containers, `give`, `clear`, `item ... with`, and `execute if/unless items` receive structural fingerprints, roles, text slots, and canonical keys. Unparsed item text remains occurrence-keyed and unresolved. Pass `--project-layout` to also create the indexed multi-file layout. `LastOutput` is excluded by default. NBT strings are strict UTF-8. Reports include function-call context, suspicious strings, path-filtered visual text candidates, PNG inventory, and export recommendations.
+- `scan`: scan Java resource-pack language JSON, all datapack JSON text components, datapack JSON strings containing text components, `.mcfunction` JSON text components, `execute ... run ...` command chains, command JSON plain strings, quoted command/SNBT JSON text components, plain command messages, storage value strings, whole sign faces, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Sign units retain four-line context and block coordinates when available. Parsed item stacks in NBT, villager offers, containers, `give`, `clear`, `item ... with`, and `execute if/unless items` receive structural fingerprints, roles, text slots, and canonical keys. Unparsed item text remains occurrence-keyed and unresolved. Static `@e[name=...]` and `@e[nbt={CustomName:...}]` references are indexed and linked to matching entity names; protected rows lose copied-world patch modes. Pass `--project-layout` to also create the indexed multi-file layout. `LastOutput` is excluded by default. NBT strings are strict UTF-8. Reports include selector identity, function-call context, suspicious strings, path-filtered visual text candidates, PNG inventory, and export recommendations.
 - `resolve-item-identities`: apply a reviewed decisions JSON to unresolved item rows, assign one manual item fingerprint, re-canonicalize keys by name/lore slot, and record external/runtime source approvals with reasons. This is the deterministic alternative to ad hoc key editing.
 - `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy. It runs identity QA before copying, selects only complete/reviewed translations by default, and reports outcomes by type. If the source already has `resources.zip`, omitting `--resource-pack` is blocked unless `--allow-separate-resource-pack` explicitly documents manual separate-pack delivery. Existing copied packs are merged by default; replacement remains explicit.
 - `apply-direct-text`: copy/extract a Java world or map zip and directly replace translated `embedded-direct` anchors in `.mcfunction`, datapack JSON, `.dat`, and `.mca` files when exact anchors match. It runs identity QA before copying, handles `command_plain_span`, plain `command_string_span`, `command_json_path`, datapack JSON `json_string_path`, and parsed NBT strings, and blocks selected rows that contain Unicode replacement characters.
@@ -83,6 +83,8 @@ python skills/mc-map-translate/scripts/mcmap_java_tools.py resolve-item-identiti
 Do not create a manual group from wording alone. Compare item ID, custom/model data, damage, enchantments, lore, all non-text components, and producer/consumer intent. An external-source decision is an audited exception, not a general QA bypass.
 
 After the first scan, read `scan_review.md` and `scan_report.json`. Explain the four export modes before spending major translation effort:
+
+Also read `selector_identity.json`. For every protected row, preserve the source text and segments with `intentional_name` plus a concrete selector reason. Review unmatched static and dynamic macro references as runtime-test items. Do not attempt to localize a protected NPC name unless the map logic is first migrated to stable tags and fully retested.
 
 - `resource-pack-only`: standalone resource-pack zip; safest, no world edits, limited to text already reachable through resources/language keys.
 - `embedded-pack-copy`: copied map/world with `resources.zip`; same text coverage as resource-pack-only, but players receive the pack with the save.
@@ -193,6 +195,7 @@ Safety limits:
 - Existing `translate` conflicts, missing paths, unsafe paths, nested `resources.zip!` paths, and missing/invalid segment keys are skipped and reported.
 - Plain NBT strings without JSON text component context are not hybrid-key-injection targets; they require explicit `embedded-direct` handling.
 - Identity-coupled item text keeps scanner-generated canonical keys shared across equivalent visible text shapes. Do not replace them with occurrence keys.
+- Selector-coupled entity names and NBT `CustomName` predicate literals have copied-world patch modes removed. Identity QA rejects changed translations or manually re-enabled Hybrid/Direct modes.
 - A source map with `resources.zip` requires merged embedding by default. `--allow-separate-resource-pack` is an explicit distribution exception.
 
 Use `--multi-text-mode skip` only when you want the old conservative behavior for audit or comparison.
@@ -235,5 +238,6 @@ The scanner reports but does not automatically localize visual text in PNG textu
 - `translations/parts/*.jsonl`: editable staged translation parts.
 - `translations/translations.jsonl`: merged canonical translation file.
 - `identity_review.json`: scanner-generated unresolved item rows plus empty reviewed-decision sections accepted by `resolve-item-identities`.
-- `qa/identity_qa.json`: blocking item fingerprint, slot-key, unresolved identity, and producer/consumer relationship report.
+- `selector_identity.json`: every static/dynamic `@e[name=...]` or NBT `CustomName` selector reference, match summary, and unresolved review list. Stable `tag/type/scores/predicate` arguments are intentionally absent.
+- `qa/identity_qa.json`: blocking item fingerprint, slot-key, unresolved identity, producer/consumer relationship, and selector-coupled entity-name report.
 - `*.identity_resolution_report.json`: audit trail for reviewed manual groups and external-source decisions.

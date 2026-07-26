@@ -42,6 +42,8 @@ For each translation batch:
 
 When a workpack contains `context.identity_coupled`, load all rows sharing its item fingerprint and slot from the indexes before deciding terminology. Use one translation and keep scanner-provided canonical keys across producers, containers, villager offers, and consumers. For `identity_resolution: unresolved`, inspect the exact anchors and record a reviewed identity decision; do not infer a group from wording alone.
 
+When a workpack contains `context.selector_identity_coupled`, read `selector_identity.json` and all listed source anchors. Preserve the source unit and segments with an `intentional_name` reason; do not translate it as ordinary NPC dialogue/name text. Unmatched or dynamic selector references belong in the runtime QA TODO, not in an inferred identity group.
+
 Do not load every file under `units/`, `workpacks/`, and `translations/parts/` at the same time.
 Do not send the workpack to an external translation service by default; translate it with Codex using the loaded context.
 
