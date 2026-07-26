@@ -4,7 +4,35 @@ Use this reference when the target is Java Edition and the user wants a non-inva
 
 ## Export Modes
 
-`resource-pack`:
+Use these names when explaining choices to the user. The internal unit `mode_support` values remain `resource-pack`, `hybrid-key-injection`, and `embedded-direct`.
+
+| User-facing mode | World data changed? | Main output | Covers | Does not cover |
+| --- | --- | --- | --- | --- |
+| `resource-pack-only` | No | Standalone resource-pack zip | Existing language keys, map-owned lang JSON, resources already designed for localization | Hardcoded command/sign/book/entity text, plain NBT strings, image/font pixels |
+| `embedded-pack-copy` | Copied world only | Copied map/world containing `resources.zip` | Same text coverage as `resource-pack-only`, but easier for players because the pack travels with the save | Hardcoded text unless it already uses translation keys |
+| `hybrid-keyed-copy` | Copied world/map patched | Copied map/world zip plus matching resource pack or embedded `resources.zip` | Existing resource-pack units plus supported hardcoded JSON text components, command JSON spans, sign segments, books, titles, bossbars, and datapack JSON text components that can become `translate` keys | Plain strings that are not JSON text components; image/font pixels |
+| `direct-text-copy` | Copied world/map patched | Copied map/world zip with direct literal text replacements | Supported plain command messages, SNBT/datapack JSON strings, and NBT strings that cannot be key-injected | Higher-risk or unsupported anchors; image/font pixels |
+
+## What "Full Translation" Means
+
+"Full translation" or "complete localization" is an output bundle, not one script flag.
+
+Default full/safest complete bundle:
+
+- standalone resource-pack zip;
+- copied map/world with `resources.zip`;
+- `hybrid-keyed-copy` when the scan finds hardcoded JSON text components;
+- QA/apply reports and residual-English audit;
+- visual asset findings for PNG/font/model text that needs separate inspection or asset localization.
+
+Maximum-coverage bundle:
+
+- everything in the default full bundle;
+- plus `direct-text-copy` for direct-only plain command/SNBT/datapack JSON/NBT strings, only after explicit user confirmation.
+
+If a map stores player-visible text as hardcoded literals, full localization usually requires a modified copied map. That modified copy is still safer than editing the original, but it is no longer a pure vanilla-original world export. If the user refuses any copied-map patching, report the remaining hardcoded text as uncovered by resource-pack-only export.
+
+`resource-pack` unit support:
 
 - Modify no world data.
 - Translate existing `assets/<namespace>/lang/*.json` entries and any text already expressed through JSON text component `translate` keys.
@@ -13,7 +41,7 @@ Use this reference when the target is Java Edition and the user wants a non-inva
 - Report hardcoded text as uncovered unless the workflow continues into hybrid key injection.
 - Report visual text in PNG/font/model assets as separate QA work; language JSON cannot translate pixels or bitmap font glyph art.
 
-`hybrid-key-injection`:
+`hybrid-key-injection` unit support:
 
 - Patch a copied map so hardcoded player-facing text becomes `{"translate":"<key>"}` while style and events remain intact.
 - Export matching language files in a resource pack.
@@ -25,7 +53,7 @@ Use this reference when the target is Java Edition and the user wants a non-inva
 `apply-hybrid-keys` is conservative but segment-aware. Single-node hardcoded components use the unit key. Multi-node hardcoded components use `segments[]` and `--multi-text-mode split-nodes` to inject one key per original `text` node, preserving styles and dynamic sibling components. If segment anchors or source text do not match, the unit is skipped and reported.
 Aggregated sign faces also use `segments[]`: translate the full sign first, then fill each segment so the apply step can replace each original sign line/text node with a generated key.
 
-`embedded-direct`:
+`embedded-direct` unit support:
 
 - Replace literal text directly inside copied map data.
 - Use only when the user explicitly does not want a resource pack.

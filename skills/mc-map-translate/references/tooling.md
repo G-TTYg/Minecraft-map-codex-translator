@@ -4,7 +4,7 @@ Use this reference before running bundled scripts.
 
 ## Scope
 
-The plugin includes its own standard tools. Do not depend on MCC-i18n or copy its code into this plugin. The useful standardized pattern is: inspect, scan, create an indexed project, translate one contextual workpack at a time, merge staged translations, validate, export a resource pack, and optionally embed that resource pack into a copied Java world.
+The plugin includes its own standard tools. Do not depend on MCC-i18n or copy its code into this plugin. The useful standardized pattern is: inspect, scan, create an indexed project, translate one contextual workpack at a time, merge staged translations, validate, choose an explicit output bundle, export a resource pack, and optionally embed or apply it to a copied Java world.
 
 The bundled tools do not call external translation services and do not translate text by themselves. They create reliable local inputs and outputs so Codex can perform context-aware expert localization, then validate and package the result.
 
@@ -49,7 +49,14 @@ python skills/mc-map-translate/scripts/mcmap_contract.py translation-status <wor
 python skills/mc-map-translate/scripts/mcmap_contract.py write-progress-todo <workdir>
 ```
 
-After the first scan, read `scan_review.md` and `scan_report.json`. If `full_localization_recommendation.suggest_full_translation_mode` is true, ask whether to continue with full translation mode before spending translation effort. The normal full path exports a standalone resource-pack zip, a copied map with `resources.zip`, a hybrid-keyed copied map zip when hardcoded text exists, and QA/apply reports.
+After the first scan, read `scan_review.md` and `scan_report.json`. Explain the available output bundles before spending major translation effort:
+
+- `resource-pack-only`: standalone resource-pack zip; safest, no world edits, limited to text already reachable through resources/language keys.
+- `embedded-pack-copy`: copied map/world with `resources.zip`; same text coverage as resource-pack-only, but players receive the pack with the save.
+- `hybrid-keyed-copy`: copied map/world patched so supported hardcoded JSON text components become `translate` keys, with a matching resource pack. This is the default full/safest complete localization core when hardcoded JSON text exists.
+- `direct-text-copy`: copied map/world with direct literal replacements for supported plain command/SNBT/datapack JSON/NBT strings. Treat as maximum-coverage/high-risk and ask for explicit confirmation.
+
+If `full_localization_recommendation.suggest_full_translation_mode` is true, ask whether to continue with the default full localization bundle. Define it as: standalone resource-pack zip, copied map with `resources.zip`, hybrid-keyed copied map zip when hardcoded JSON text exists, QA/apply reports, residual-English audit, and visual-asset findings. Offer `direct-text-copy` only as an optional add-on for direct-only text after the user accepts the risk.
 
 ## Encoding Discipline
 
@@ -87,20 +94,20 @@ python skills/mc-map-translate/scripts/mcmap_contract.py write-progress-todo <wo
 
 If a translation part changes after `translations/translations.jsonl` exists, run `merge-translations` again before exporting from the project root.
 
-For standalone resource-pack export:
+For `resource-pack-only` export:
 
 ```bash
 python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack <workdir> --out <workdir>/exports/resource-pack --pack-format <pack_format> --target <target_locale>
 python skills/mc-map-translate/scripts/mcmap_java_tools.py zip-resource-pack <workdir>/exports/resource-pack --out <workdir>/exports/resource-pack.zip
 ```
 
-For hybrid key-injection preparation:
+For `hybrid-keyed-copy` preparation:
 
 ```bash
 python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack <workdir> --out <workdir>/exports/hybrid-resource-pack --pack-format <pack_format> --target <target_locale> --include-hybrid-keys
 ```
 
-Then patch a copied world or copied map zip:
+Then patch a copied world or copied map zip. Include `--resource-pack` when you want the copied directory output to contain `resources.zip`:
 
 ```bash
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys <world-or-zip> --translations <workdir> --out <workdir>/exports/world-keyed --resource-pack <workdir>/exports/hybrid-resource-pack
@@ -109,13 +116,13 @@ python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-direct-text <wo
 python skills/mc-map-translate/scripts/mcmap_java_tools.py audit-english <workdir>/exports/world-full-direct.zip --out <workdir>/qa/residual_english_audit.json
 ```
 
-For translated direct text that cannot be key-injected:
+For `direct-text-copy` translated text that cannot be key-injected:
 
 ```bash
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-direct-text <world-or-zip> --translations <workdir> --out <workdir>/exports/world-direct-text.zip --min-confidence low
 ```
 
-To ship a copied world with the pack embedded:
+For `embedded-pack-copy`, ship a copied world with the pack embedded:
 
 ```bash
 python skills/mc-map-translate/scripts/mcmap_java_tools.py embed-resource-pack <world> --resource-pack <workdir>/exports/resource-pack --out <workdir>/exports/world-with-resources

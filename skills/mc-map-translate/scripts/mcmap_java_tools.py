@@ -2368,9 +2368,11 @@ def visual_text_asset_kind(path: str) -> str:
 def full_localization_recommendation(report: dict[str, Any]) -> dict[str, Any]:
     reasons: list[str] = []
     counts_by_mode = report.get("counts_by_mode", {})
+    has_hybrid = bool(counts_by_mode.get("hybrid-key-injection", 0))
+    has_direct = bool(report.get("direct_only_unit_count", 0) or report.get("plain_command_string_unit_count", 0))
     if counts_by_mode.get("hybrid-key-injection", 0):
         reasons.append("hardcoded JSON text components require hybrid key injection in a copied map for resource-pack-backed localization")
-    if report.get("direct_only_unit_count", 0) or report.get("plain_command_string_unit_count", 0):
+    if has_direct:
         reasons.append("plain command/SNBT/datapack JSON/NBT strings require explicit embedded-direct copied-world patching")
     visual = report.get("visual_text_asset_hints", {})
     if visual.get("total", 0):
@@ -2383,12 +2385,67 @@ def full_localization_recommendation(report: dict[str, Any]) -> dict[str, Any]:
         "ask_user_after_scan": True,
         "suggest_full_translation_mode": bool(reasons),
         "reasons": reasons,
+        "export_modes": [
+            {
+                "name": "resource-pack-only",
+                "world_data_changed": False,
+                "confirmation_required": False,
+                "output": "standalone resource-pack zip",
+                "covers": "existing language/resource entries and text already using translate keys",
+                "limits": "does not cover hardcoded command/sign/book/entity/plain NBT text or visual text in images/fonts",
+            },
+            {
+                "name": "embedded-pack-copy",
+                "world_data_changed": "copy-only",
+                "confirmation_required": False,
+                "output": "copied map/world with resources.zip beside level.dat",
+                "covers": "same text as resource-pack-only, with easier distribution to players",
+                "limits": "does not cover hardcoded text unless it already uses translate keys",
+            },
+            {
+                "name": "hybrid-keyed-copy",
+                "world_data_changed": "copied map patched",
+                "confirmation_required": False,
+                "output": "copied map/world zip plus matching resource pack or embedded resources.zip",
+                "covers": "resource-pack units plus supported hardcoded JSON text components converted to translate keys",
+                "limits": "does not cover direct-only plain strings or visual image/font text",
+                "recommended_when": "hardcoded JSON text exists" if has_hybrid else "not required by current scan unless future QA finds hardcoded JSON text",
+            },
+            {
+                "name": "direct-text-copy",
+                "world_data_changed": "copied map patched",
+                "confirmation_required": True,
+                "output": "copied map/world zip with direct literal replacements",
+                "covers": "supported plain command/SNBT/datapack JSON/NBT strings that cannot be key-injected",
+                "limits": "higher risk; exact anchors only; must be validated and reported separately",
+                "recommended_when": "direct-only text remains" if has_direct else "not required by current scan unless residual audit finds direct-only text",
+            },
+        ],
+        "full_translation_definition": {
+            "not_a_single_mode": True,
+            "default_full_localization_bundle_name": "hybrid-keyed-copy full bundle",
+            "default_full_localization_bundle": [
+                "standalone resource-pack zip",
+                "copied map/world with resources.zip",
+                "hybrid-keyed copied map/world when hardcoded JSON text exists",
+                "QA/apply reports",
+                "residual-English audit",
+                "visual-asset findings for PNG/font/model text",
+            ],
+            "maximum_coverage_addon": "direct-text-copy for direct-only plain command/SNBT/datapack JSON/NBT strings, only after explicit user confirmation",
+            "resource_pack_only_is_full_only_when": "all player-facing text is already reachable through language/resource keys and no hardcoded/direct-only/visual text remains",
+        },
         "default_safe_exports": [
             "standalone resource-pack zip",
             "copied map with resources.zip",
             "hybrid-keyed copied map zip when hardcoded text is translated",
             "QA/apply reports",
         ],
+        "user_prompt": (
+            "Choose an output bundle: resource-pack-only, embedded-pack-copy, hybrid-keyed-copy "
+            "(default full/safest complete localization when hardcoded JSON text exists), or direct-text-copy "
+            "(maximum coverage, explicit confirmation required)."
+        ),
     }
 
 
@@ -2458,15 +2515,41 @@ def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, A
             lines.append(f"- `{sample.get('kind', '')}` `{sample.get('path', '')}`")
     recommendation = report.get("full_localization_recommendation", {})
     if recommendation:
+        lines.extend(["", "## Export Mode Choices", ""])
+        lines.append("Explain these output bundles to the user before major translation/export work:")
+        for mode in recommendation.get("export_modes", []):
+            lines.append(
+                f"- `{mode.get('name', '')}`: output={mode.get('output', '')}; covers={mode.get('covers', '')}; limits={mode.get('limits', '')}."
+            )
+        full_definition = recommendation.get("full_translation_definition", {})
+        if full_definition:
+            lines.extend(["", "## Full Translation Definition", ""])
+            lines.append(
+                "`Full translation` is not one script mode. It is the selected full localization output bundle after scan coverage is known."
+            )
+            bundle = full_definition.get("default_full_localization_bundle", [])
+            if bundle:
+                lines.append("Default full/safest complete bundle:")
+                for item in bundle:
+                    lines.append(f"- {item}")
+            addon = full_definition.get("maximum_coverage_addon")
+            if addon:
+                lines.append(f"Maximum-coverage add-on: {addon}.")
+            condition = full_definition.get("resource_pack_only_is_full_only_when")
+            if condition:
+                lines.append(f"Resource-pack-only is complete only when {condition}.")
         lines.extend(["", "## Full Translation Mode Prompt", ""])
         if recommendation.get("suggest_full_translation_mode"):
             lines.append(
-                "Ask the user whether to continue with full translation mode: resource-pack export plus hybrid keyed copied map, optional embedded-direct copied-world patches, and explicit visual-asset QA."
+                "Ask the user whether to continue with the default full localization bundle: standalone resource pack, copied map with resources.zip, hybrid-keyed copied map when hardcoded JSON text exists, QA/apply reports, residual-English audit, and visual-asset findings."
+            )
+            lines.append(
+                "Offer direct-text-copy separately for direct-only plain command/SNBT/datapack JSON/NBT strings, and require explicit confirmation before producing it."
             )
             for reason in recommendation.get("reasons", []):
                 lines.append(f"- {reason}")
         else:
-            lines.append("Resource-pack-first export appears sufficient for currently scanned text, subject to in-game QA.")
+            lines.append("Resource-pack-only export appears sufficient for currently scanned text, subject to residual-English and in-game QA.")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
