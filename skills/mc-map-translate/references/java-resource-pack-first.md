@@ -4,31 +4,27 @@ Use this reference when the target is Java Edition and the user wants a non-inva
 
 ## Export Modes
 
-Use these names when explaining choices to the user. The internal unit `mode_support` values remain `resource-pack`, `hybrid-key-injection`, and `embedded-direct`.
+Use these four names when explaining choices to the user. The internal unit `mode_support` values remain `resource-pack`, `hybrid-key-injection`, and `embedded-direct`.
 
 | User-facing mode | World data changed? | Main output | Covers | Does not cover |
 | --- | --- | --- | --- | --- |
 | `resource-pack-only` | No | Standalone resource-pack zip | Existing language keys, map-owned lang JSON, resources already designed for localization | Hardcoded command/sign/book/entity text, plain NBT strings, image/font pixels |
 | `embedded-pack-copy` | Copied world only | Copied map/world containing `resources.zip` | Same text coverage as `resource-pack-only`, but easier for players because the pack travels with the save | Hardcoded text unless it already uses translation keys |
 | `hybrid-keyed-copy` | Copied world/map patched | Copied map/world zip plus matching resource pack or embedded `resources.zip` | Existing resource-pack units plus supported hardcoded JSON text components, command JSON spans, sign segments, books, titles, bossbars, and datapack JSON text components that can become `translate` keys | Plain strings that are not JSON text components; image/font pixels |
-| `direct-text-copy` | Copied world/map patched | Copied map/world zip with direct literal text replacements | Supported plain command messages, SNBT/datapack JSON strings, and NBT strings that cannot be key-injected | Higher-risk or unsupported anchors; image/font pixels |
+| `direct-text-copy` | Copied world/map patched | Copied map/world zip with direct literal text replacements | Supported plain command messages, SNBT/datapack JSON strings, and NBT strings that cannot be key-injected; may start from a hybrid-keyed copy when both source kinds exist | Higher-risk or unsupported anchors; image/font pixels |
 
 ## What "Full Translation" Means
 
-"Full translation" or "complete localization" is an output bundle, not one script flag.
+"Full translation" or "complete localization" is not a fifth export mode. It means choosing the least invasive one of the four modes that covers the scanned player-facing text.
 
-Default full/safest complete bundle:
+Typical selection:
 
-- standalone resource-pack zip;
-- copied map/world with `resources.zip`;
-- `hybrid-keyed-copy` when the scan finds hardcoded JSON text components;
-- QA/apply reports and residual-English audit;
-- visual asset findings for PNG/font/model text that needs separate inspection or asset localization.
+- Use `resource-pack-only` when all player-facing text is already reachable through language/resource keys.
+- Use `embedded-pack-copy` when the same coverage is enough but the save should carry `resources.zip`.
+- Use `hybrid-keyed-copy` as the safest complete mode when the scan finds hardcoded JSON text components.
+- Use `direct-text-copy` as the maximum-coverage mode when direct-only plain command/SNBT/datapack JSON/NBT strings remain and the user explicitly accepts the risk.
 
-Maximum-coverage bundle:
-
-- everything in the default full bundle;
-- plus `direct-text-copy` for direct-only plain command/SNBT/datapack JSON/NBT strings, only after explicit user confirmation.
+Each mode may produce several artifacts, such as a map zip, a resource-pack zip, `resources.zip`, apply reports, residual-English audit, and visual asset findings. These are artifacts of the selected mode, not extra modes.
 
 If a map stores player-visible text as hardcoded literals, full localization usually requires a modified copied map. That modified copy is still safer than editing the original, but it is no longer a pure vanilla-original world export. If the user refuses any copied-map patching, report the remaining hardcoded text as uncovered by resource-pack-only export.
 

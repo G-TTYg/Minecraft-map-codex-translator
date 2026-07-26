@@ -17,7 +17,7 @@ Treat every translation artifact as Unicode data. Read and write JSON, JSONL, TS
 
 Treat backslash escapes as structural data. In JSONL, a real newline is serialized on disk as `\n`; that does not mean the two visible characters backslash+n are player text. Conversely, some commands, SNBT strings, storage values, and JSON strings intentionally contain a literal `\\n` escape. Preserve the source escape shape unless deliberately rewriting the surrounding command/JSON layer, and validate before export/apply.
 
-The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injection` when hardcoded JSON text components must be converted to translation keys in a copied world. Use `embedded-direct` only after explicit confirmation for plain command/SNBT/datapack JSON/NBT strings that cannot be key-injected. "Full translation" is not a single script mode: it means a documented output bundle chosen after scan coverage is known.
+The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injection` when hardcoded JSON text components must be converted to translation keys in a copied world. Use `embedded-direct` only after explicit confirmation for plain command/SNBT/datapack JSON/NBT strings that cannot be key-injected. There are four user-facing export modes; "full translation" is not a fifth mode.
 
 ## Decision Tree
 
@@ -26,12 +26,12 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - If Bedrock-only markers appear, stop and report that this skill currently supports Java only.
    - If unknown, run `mcmap_java_tools.py inspect` first and report the confidence level.
 
-2. Choose the user-facing export bundle and explain it clearly.
+2. Choose one user-facing export mode and explain it clearly.
    - `resource-pack-only`: standalone resource pack zip; no world edits; covers only existing language keys/resources and text already using `translate`.
    - `embedded-pack-copy`: copied world/map with `resources.zip`; still no text patching beyond the pack; useful when users should not manually install a pack.
    - `hybrid-keyed-copy`: copied world/map patched so supported hardcoded JSON text components use generated `translate` keys, with a matching resource pack embedded or shipped separately.
-   - `direct-text-copy`: copied world/map with direct literal replacements for supported plain command/SNBT/datapack JSON/NBT strings; higher risk and requires explicit confirmation.
-   - Define "full translation" to the user as the recommended full localization bundle: standalone resource-pack zip, copied map with embedded `resources.zip`, hybrid-keyed copied map when hardcoded JSON text exists, QA/apply reports, residual-English audit, and visual-asset findings. Add `direct-text-copy` only when the user accepts the risk for text that cannot be represented by translation keys.
+   - `direct-text-copy`: copied world/map with direct literal replacements for supported plain command/SNBT/datapack JSON/NBT strings; it may be produced on top of hybrid key injection when both source kinds exist, is higher risk, and requires explicit confirmation.
+   - Define "full translation" to the user as a coverage goal resolved to one of these four modes after scan: use `hybrid-keyed-copy` for the safest complete mode when hardcoded JSON text exists; use `direct-text-copy` for maximum coverage only when direct-only text remains and the user accepts the risk.
 
 3. Load the minimum required references.
    - For Java export modes, read `references/java-resource-pack-first.md`.
@@ -57,7 +57,7 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - Treat scanner coverage as a first-class QA surface. Review `scan_review.md`, `scan_report.json`, excluded `LastOutput` counts, aggregated sign groups, visual asset hints, and pending parser coverage before declaring translation coverage.
    - Treat modern datapacks as a priority source. Expect text in `.mcfunction`, `execute ... run ...` chains, macro function lines, storage JSON/SNBT, loot tables, item modifiers, advancements, predicates, and custom JSON under `datapacks/*/data/**`.
    - Use scanner-reported `function_call_graph` and `suspicious_text_hints` to recover dialogue order and review likely player-facing storage/macro/custom JSON strings that were not safely promoted to normal apply units.
-   - After the first scan, summarize coverage by export mode and ask which bundle to produce. When `full_localization_recommendation.suggest_full_translation_mode` is true, explain that the default full/safest complete bundle is `hybrid-keyed-copy` plus resource-pack outputs and QA; `direct-text-copy` is an optional maximum-coverage add-on requiring explicit confirmation.
+   - After the first scan, summarize coverage by export mode and ask which of the four modes to produce. When `full_localization_recommendation.suggest_full_translation_mode` is true, recommend `hybrid-keyed-copy` as the safest complete mode for hardcoded JSON text, or ask whether to upgrade to `direct-text-copy` when direct-only text remains and the user wants maximum coverage.
    - Preserve command syntax, selectors, score names, NBT paths, JSON text component structure, colors, click events, hover events, newlines, and placeholders.
 
 3. Build context before translating.

@@ -4,7 +4,7 @@ Use this reference before running bundled scripts.
 
 ## Scope
 
-The plugin includes its own standard tools. Do not depend on MCC-i18n or copy its code into this plugin. The useful standardized pattern is: inspect, scan, create an indexed project, translate one contextual workpack at a time, merge staged translations, validate, choose an explicit output bundle, export a resource pack, and optionally embed or apply it to a copied Java world.
+The plugin includes its own standard tools. Do not depend on MCC-i18n or copy its code into this plugin. The useful standardized pattern is: inspect, scan, create an indexed project, translate one contextual workpack at a time, merge staged translations, validate, choose one explicit export mode, export a resource pack, and optionally embed or apply it to a copied Java world.
 
 The bundled tools do not call external translation services and do not translate text by themselves. They create reliable local inputs and outputs so Codex can perform context-aware expert localization, then validate and package the result.
 
@@ -49,14 +49,14 @@ python skills/mc-map-translate/scripts/mcmap_contract.py translation-status <wor
 python skills/mc-map-translate/scripts/mcmap_contract.py write-progress-todo <workdir>
 ```
 
-After the first scan, read `scan_review.md` and `scan_report.json`. Explain the available output bundles before spending major translation effort:
+After the first scan, read `scan_review.md` and `scan_report.json`. Explain the four export modes before spending major translation effort:
 
 - `resource-pack-only`: standalone resource-pack zip; safest, no world edits, limited to text already reachable through resources/language keys.
 - `embedded-pack-copy`: copied map/world with `resources.zip`; same text coverage as resource-pack-only, but players receive the pack with the save.
 - `hybrid-keyed-copy`: copied map/world patched so supported hardcoded JSON text components become `translate` keys, with a matching resource pack. This is the default full/safest complete localization core when hardcoded JSON text exists.
-- `direct-text-copy`: copied map/world with direct literal replacements for supported plain command/SNBT/datapack JSON/NBT strings. Treat as maximum-coverage/high-risk and ask for explicit confirmation.
+- `direct-text-copy`: copied map/world with direct literal replacements for supported plain command/SNBT/datapack JSON/NBT strings. It may start from a hybrid-keyed copy when both source kinds exist. Treat as maximum-coverage/high-risk and ask for explicit confirmation.
 
-If `full_localization_recommendation.suggest_full_translation_mode` is true, ask whether to continue with the default full localization bundle. Define it as: standalone resource-pack zip, copied map with `resources.zip`, hybrid-keyed copied map zip when hardcoded JSON text exists, QA/apply reports, residual-English audit, and visual-asset findings. Offer `direct-text-copy` only as an optional add-on for direct-only text after the user accepts the risk.
+If `full_localization_recommendation.suggest_full_translation_mode` is true, explain that "full translation" is not a fifth mode. Recommend the least invasive of the four modes that covers the scan: usually `hybrid-keyed-copy` when hardcoded JSON text exists, or `direct-text-copy` only when direct-only text remains and the user explicitly accepts the risk. Reports, audits, resource-pack zips, and copied-map zips are artifacts of the selected mode.
 
 ## Encoding Discipline
 

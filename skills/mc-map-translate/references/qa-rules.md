@@ -41,7 +41,7 @@ Report counts by:
 - Total units.
 - Units translated.
 - Units skipped.
-- Selected user-facing output bundle: `resource-pack-only`, `embedded-pack-copy`, `hybrid-keyed-copy`, or `direct-text-copy`.
+- Selected user-facing export mode: `resource-pack-only`, `embedded-pack-copy`, `hybrid-keyed-copy`, or `direct-text-copy`.
 - Units covered by `resource-pack`.
 - Units requiring `hybrid-key-injection`.
 - Units requiring `embedded-direct`.
@@ -57,7 +57,7 @@ Report counts by:
 - Any encoding or font-rendering risks found during table round-trip, resource-pack export, copied-world apply, or in-game review.
 - Any escape-shape risks found during JSONL/TSV round-trip, resource-pack export, copied-world apply, or in-game review.
 
-When reporting "full translation", state the exact bundle delivered. The default full/safest complete bundle is `hybrid-keyed-copy` plus resource-pack outputs, copied `resources.zip`, QA/apply reports, residual-English audit, and visual asset findings. `direct-text-copy` is a separate maximum-coverage add-on that must be named explicitly and confirmed by the user.
+When reporting "full translation", state the exact export mode delivered. Full translation is not a fifth mode: it means the selected mode is the least invasive one that covers the scanned player-facing text. `hybrid-keyed-copy` is usually the safest complete mode for hardcoded JSON text; `direct-text-copy` is the maximum-coverage mode and must be named explicitly and confirmed by the user.
 
 ## Risk Report
 

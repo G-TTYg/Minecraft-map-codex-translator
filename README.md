@@ -90,20 +90,20 @@ Codex should follow this flow for real maps:
 2. Scan the map into `translation_units.jsonl`.
 3. Create the indexed multi-file project layout.
 4. Read `scan_review.md` and `scan_report.json`.
-5. Explain export modes and ask what output bundle to produce.
+5. Explain the four export modes and ask which mode to produce.
 6. Build or update `glossary.md`.
 7. Maintain `translation_progress.md` as the persistent TODO list.
 8. Translate one contextual workpack at a time.
 9. Merge staged translations.
 10. Validate units, encoding, escapes, placeholders, and Minecraft structures.
-11. Export the selected output bundle.
+11. Export the selected mode.
 12. Run apply reports and residual-English QA where relevant.
 
 Codex should not load the entire map into the model context. The scanner creates a searchable/indexed project so Codex can load only the relevant workpack, source summaries, and nearby context for each translation batch.
 
 ## Export Modes
 
-The plugin distinguishes internal unit support from user-facing output bundles. These are the modes Codex should explain after the first scan.
+The plugin distinguishes internal unit support from user-facing export modes. These are the four modes Codex should explain after the first scan.
 
 | Mode | Changes world data? | Main output | Best for | Limits |
 | --- | --- | --- | --- | --- |
@@ -114,18 +114,16 @@ The plugin distinguishes internal unit support from user-facing output bundles. 
 
 ## What "Full Translation" Means
 
-"Full translation" is not one script flag.
+"Full translation" is not a fifth export mode. It means Codex should pick the least invasive one of the four modes that covers the scanned player-facing text.
 
-The default full/safest complete localization bundle is:
+Typical choice:
 
-- standalone resource-pack zip;
-- copied map/world with `resources.zip`;
-- `hybrid-keyed-copy` when hardcoded JSON text components exist;
-- QA/apply reports;
-- residual-English audit;
-- visual asset findings for PNG/font/model text.
+- choose `resource-pack-only` if all player-facing text is already reachable through language/resource keys;
+- choose `embedded-pack-copy` if the same coverage is enough but the map should carry `resources.zip`;
+- choose `hybrid-keyed-copy` as the safest complete mode when hardcoded JSON text components exist;
+- choose `direct-text-copy` for maximum coverage when direct-only command/SNBT/datapack JSON/NBT strings remain and the user explicitly accepts the risk.
 
-For maximum coverage, Codex can additionally produce `direct-text-copy`, but only after the user explicitly accepts the risk of direct literal replacement in copied world data.
+Each mode can naturally produce several files, such as a map zip, a resource-pack zip, apply reports, and QA audits. Those files are the artifacts of the selected mode, not separate modes.
 
 Resource-pack-only output is truly complete only when all player-facing text is already reachable through language/resource keys and no hardcoded, direct-only, or visual-image text remains.
 
