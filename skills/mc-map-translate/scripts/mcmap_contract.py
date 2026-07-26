@@ -32,6 +32,15 @@ REQUIRED_UNIT_FIELDS = {
 
 VALID_MODES = {"resource-pack", "hybrid-key-injection", "embedded-direct"}
 VALID_CONFIDENCE = {"high", "medium", "low"}
+VALID_REVIEW_STATUSES = {
+    "translated",
+    "intentional_name",
+    "code",
+    "ascii_art",
+    "puzzle_token",
+    "unreviewed_same_as_source",
+}
+APPROVED_PRESERVE_STATUSES = {"intentional_name", "code", "ascii_art", "puzzle_token"}
 KEY_RE = re.compile(r"^[a-z0-9_.-]+$")
 LOCALE_RE = re.compile(r"^[a-z]{2,3}_[a-z0-9]{2,8}$")
 
@@ -177,12 +186,51 @@ def escape_shape_errors(raw: Any, translation: Any, field: str, line: Any) -> li
     return errors
 
 
+def translation_review_state(item: dict[str, Any]) -> str:
+    raw = str(item.get("raw", ""))
+    translation = str(item.get("translation", ""))
+    if not translation.strip():
+        return "untranslated"
+    if translation != raw:
+        return "translated"
+    status = str(item.get("review_status", "")).strip()
+    reason = str(item.get("review_reason", "")).strip()
+    if status in APPROVED_PRESERVE_STATUSES and reason:
+        return status
+    return "unreviewed_same_as_source"
+
+
+def translation_item_complete(item: dict[str, Any]) -> bool:
+    return translation_review_state(item) not in {"untranslated", "unreviewed_same_as_source"}
+
+
+def translation_review_errors(item: dict[str, Any], field: str, line: Any) -> list[str]:
+    status = str(item.get("review_status", "")).strip()
+    reason = str(item.get("review_reason", "")).strip()
+    raw = str(item.get("raw", ""))
+    translation = str(item.get("translation", ""))
+    errors: list[str] = []
+    if status and status not in VALID_REVIEW_STATUSES:
+        errors.append(f"line {line}: {field}.review_status is invalid: {status}")
+    if not translation.strip():
+        return errors
+    if translation == raw:
+        if status not in APPROVED_PRESERVE_STATUSES or not reason:
+            errors.append(
+                f"line {line}: {field} equals the source; set review_status to intentional_name, code, ascii_art, or puzzle_token and write review_reason"
+            )
+    elif status in APPROVED_PRESERVE_STATUSES or status == "unreviewed_same_as_source":
+        errors.append(f"line {line}: {field}.review_status={status} conflicts with a changed translation")
+    return errors
+
+
 def unit_encoding_errors(unit: dict[str, Any]) -> list[str]:
     line = unit.get("_line_no", "?")
     errors: list[str] = []
     errors.extend(replacement_character_errors(unit.get("raw", ""), "raw", line))
     errors.extend(replacement_character_errors(unit.get("translation", ""), "translation", line))
     errors.extend(replacement_character_errors(unit.get("notes", ""), "notes", line))
+    errors.extend(replacement_character_errors(unit.get("review_reason", ""), "review_reason", line))
     errors.extend(escape_shape_errors(unit.get("raw", ""), unit.get("translation", ""), "translation", line))
     segments = unit.get("segments")
     if isinstance(segments, list):
@@ -191,6 +239,7 @@ def unit_encoding_errors(unit: dict[str, Any]) -> list[str]:
                 continue
             errors.extend(replacement_character_errors(segment.get("raw", ""), f"segments[{offset}].raw", line))
             errors.extend(replacement_character_errors(segment.get("translation", ""), f"segments[{offset}].translation", line))
+            errors.extend(replacement_character_errors(segment.get("review_reason", ""), f"segments[{offset}].review_reason", line))
             errors.extend(
                 escape_shape_errors(
                     segment.get("raw", ""),
@@ -258,6 +307,13 @@ def validate_unit(unit: dict[str, Any]) -> list[str]:
             for token in protected:
                 if str(token) not in str(translation):
                     errors.append(f"line {line}: protected token missing from translation: {visible_escape(str(token))}")
+
+    errors.extend(translation_review_errors(unit, "translation", line))
+    segments = unit.get("segments")
+    if isinstance(segments, list):
+        for offset, segment in enumerate(segments):
+            if isinstance(segment, dict):
+                errors.extend(translation_review_errors(segment, f"segments[{offset}].translation", line))
 
     errors.extend(validate_segments(unit))
     return errors
@@ -373,6 +429,8 @@ def ensure_segments(row: dict[str, Any], overwrite: bool = False) -> bool:
                 "json_path": json_path,
                 "raw": str(node.get("text", "")),
                 "translation": str(existing.get("translation", "")),
+                "review_status": str(existing.get("review_status", "")),
+                "review_reason": str(existing.get("review_reason", "")),
                 "translation_key": str(existing.get("translation_key") or default_segment_key(row, index)),
             }
         )
@@ -469,6 +527,77 @@ def iter_pack_entries(
         yield resource_namespace, str(key), raw, translation, row_id, "unit"
 
 
+def identity_consistency_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        if not context.get("identity_coupled"):
+            continue
+        group_id = str(context.get("identity_group", "")).strip()
+        if group_id:
+            groups[group_id].append(row)
+
+    conflicts: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
+    for group_id, group_rows in sorted(groups.items()):
+        keys_by_slot: dict[str, set[str]] = defaultdict(set)
+        translations_by_slot: dict[str, set[str]] = defaultdict(set)
+        roles: Counter[str] = Counter()
+        for row in group_rows:
+            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            roles[str(context.get("identity_role", "item_component"))] += 1
+            key = str(row.get("translation_key", "")).strip()
+            if key and "hybrid-key-injection" in row.get("mode_support", []):
+                keys_by_slot["unit"].add(key)
+            translation = str(row.get("translation", ""))
+            if translation.strip():
+                translations_by_slot["unit"].add(translation)
+            for segment in segment_entries(row):
+                slot = f"segment:{segment.get('index', '')}"
+                segment_key = str(segment.get("translation_key", "")).strip()
+                if segment_key:
+                    keys_by_slot[slot].add(segment_key)
+                segment_translation = str(segment.get("translation", ""))
+                if segment_translation.strip():
+                    translations_by_slot[slot].add(segment_translation)
+
+        key_conflicts = {slot: sorted(values) for slot, values in keys_by_slot.items() if len(values) > 1}
+        translation_conflicts = {
+            slot: sorted(values) for slot, values in translations_by_slot.items() if len(values) > 1
+        }
+        if key_conflicts or translation_conflicts:
+            conflicts.append(
+                {
+                    "identity_group": group_id,
+                    "unit_ids": [str(row.get("id", "")) for row in group_rows],
+                    "key_conflicts": key_conflicts,
+                    "translation_conflicts": translation_conflicts,
+                }
+            )
+        summaries.append(
+            {
+                "identity_group": group_id,
+                "unit_count": len(group_rows),
+                "source_kind": str(group_rows[0].get("source_kind", "")),
+                "raw": str(group_rows[0].get("raw", "")),
+                "roles": dict(sorted(roles.items())),
+                "canonical_keys": {slot: sorted(values) for slot, values in sorted(keys_by_slot.items())},
+            }
+        )
+
+    return {
+        "group_count": len(groups),
+        "unit_count": sum(len(group) for group in groups.values()),
+        "conflict_count": len(conflicts),
+        "conflicts": conflicts,
+        "groups": summaries,
+        "scope_note": (
+            "Static QA verifies canonical translation keys and translations within scanner identity groups. "
+            "It does not replace in-game trade, clear, predicate, NPC-selector, or quest-item testing."
+        ),
+    }
+
+
 def make_resource_pack(args: argparse.Namespace) -> int:
     require_locale(args.target, "--target")
     if args.source_locale:
@@ -480,6 +609,18 @@ def make_resource_pack(args: argparse.Namespace) -> int:
     errors: list[str] = []
     for row in rows:
         errors.extend(unit_encoding_errors(row))
+        errors.extend(translation_review_errors(row, "translation", row.get("_line_no", "?")))
+        for offset, segment in enumerate(segment_entries(row)):
+            errors.extend(
+                translation_review_errors(
+                    segment,
+                    f"segments[{offset}].translation",
+                    row.get("_line_no", "?"),
+                )
+            )
+    identity_qa = identity_consistency_report(rows)
+    if identity_qa["conflict_count"]:
+        errors.append(f"identity-coupled translation/key conflicts: {identity_qa['conflict_count']} group(s)")
     lang_by_namespace: dict[str, dict[str, str]] = {}
     source_by_namespace: dict[str, dict[str, str]] = {}
     emitted_unit_ids: set[str] = set()
@@ -540,6 +681,7 @@ def make_resource_pack(args: argparse.Namespace) -> int:
         "segment_entry_count": segment_entry_count,
         "rows_without_pack_entries": sum(1 for row in rows if str(row.get("id", "")) not in emitted_unit_ids),
         "include_hybrid_keys": args.include_hybrid_keys,
+        "identity_qa": identity_qa,
         "hardcoded_units_not_included": sum(
             1
             for row in rows
@@ -674,6 +816,7 @@ def grouped_mode_counts(rows: Iterable[dict[str, Any]]) -> dict[str, int]:
 
 def minimal_index_row(row: dict[str, Any], workpack_path: str = "", translation_part: str = "") -> dict[str, Any]:
     segments = segment_entries(row)
+    context = row.get("context") if isinstance(row.get("context"), dict) else {}
     return {
         "id": row.get("id", ""),
         "source_kind": row.get("source_kind", ""),
@@ -684,6 +827,10 @@ def minimal_index_row(row: dict[str, Any], workpack_path: str = "", translation_
         "mode_support": row.get("mode_support", []),
         "confidence": row.get("confidence", ""),
         "protected": row.get("protected", []),
+        "review_status": row.get("review_status", ""),
+        "identity_coupled": bool(context.get("identity_coupled")),
+        "identity_group": context.get("identity_group", ""),
+        "identity_role": context.get("identity_role", ""),
         "segment_count": len(segments),
         "workpack": workpack_path,
         "translation_part": translation_part,
@@ -720,10 +867,10 @@ def write_source_summary(path: Path, source_file: str, rows: list[dict[str, Any]
 
 
 def row_translation_complete(row: dict[str, Any]) -> bool:
-    if not str(row.get("translation", "")).strip():
+    if not translation_item_complete(row):
         return False
     segments = segment_entries(row)
-    if segments and any(not str(segment.get("translation", "")).strip() for segment in segments):
+    if segments and any(not translation_item_complete(segment) for segment in segments):
         return False
     return True
 
@@ -739,6 +886,16 @@ def pack_progress(rows: list[dict[str, Any]], expected_count: int | None = None)
         for segment in segment_entries(row)
         if str(segment.get("translation", "")).strip()
     )
+    unreviewed_same_as_source = sum(
+        1
+        for row in rows
+        if translation_review_state(row) == "unreviewed_same_as_source"
+    ) + sum(
+        1
+        for row in rows
+        for segment in segment_entries(row)
+        if translation_review_state(segment) == "unreviewed_same_as_source"
+    )
     if total_units and complete_units >= total_units and translated_segments >= total_segments:
         status = "complete"
     elif translated_units or translated_segments:
@@ -752,6 +909,7 @@ def pack_progress(rows: list[dict[str, Any]], expected_count: int | None = None)
         "complete_units": complete_units,
         "total_segments": total_segments,
         "translated_segments": translated_segments,
+        "unreviewed_same_as_source": unreviewed_same_as_source,
     }
 
 
@@ -776,6 +934,7 @@ def format_progress_line(pack: dict[str, Any], stats: dict[str, int | str]) -> s
         f"units {stats['complete_units']}/{stats['total_units']} complete "
         f"({stats['translated_units']} translated), "
         f"segments {stats['translated_segments']}/{stats['total_segments']}; "
+        f"unreviewed same-as-source {stats['unreviewed_same_as_source']}; "
         f"part `{part_name}`; sources {source_count}; kinds {kind_text}"
     )
 
@@ -818,6 +977,7 @@ def write_progress_todo_file(project_root: Path, out: Path | None = None) -> dic
         overall["complete_units"] += int(stats["complete_units"])
         overall["total_segments"] += int(stats["total_segments"])
         overall["translated_segments"] += int(stats["translated_segments"])
+        overall["unreviewed_same_as_source"] += int(stats["unreviewed_same_as_source"])
         lines.append(format_progress_line(pack, stats))
 
     complete_packs = sum(1 for item in pack_reports if item["status"] == "complete")
@@ -834,12 +994,13 @@ def write_progress_todo_file(project_root: Path, out: Path | None = None) -> dic
             f"- Complete units: {overall['complete_units']}/{overall['total_units']}",
             f"- Translated units: {overall['translated_units']}/{overall['total_units']}",
             f"- Translated segments: {overall['translated_segments']}/{overall['total_segments']}",
+            f"- Unreviewed same-as-source slots: {overall['unreviewed_same_as_source']}",
             "",
             "## Maintenance Rules",
             "",
             "- Mark the active workpack in the conversation TODO before editing it.",
             "- Keep this file synchronized with `translations/parts/*.jsonl`; rerun `write-progress-todo` after each batch.",
-            "- Do not mark a workpack complete until full-unit translations and all required segment translations are filled.",
+            "- Do not mark a workpack complete until full-unit translations and all required segment translations are filled; unchanged source text needs an approved review status and reason.",
             "- Run `merge-translations`, `validate-units`, and `translation-status` before final export.",
             "",
         ]
@@ -857,6 +1018,7 @@ def write_progress_todo_file(project_root: Path, out: Path | None = None) -> dic
         "translated_units": overall["translated_units"],
         "total_segments": overall["total_segments"],
         "translated_segments": overall["translated_segments"],
+        "unreviewed_same_as_source": overall["unreviewed_same_as_source"],
     }
 
 
@@ -986,8 +1148,10 @@ def make_project_files(args: argparse.Namespace) -> int:
         "4. Read only the listed `context/source-summaries/*.md` files and any nearby source/kind index rows needed for that pack.",
         "5. Fill `translation` in the matching `translations/parts/workpack_###.jsonl` file.",
         "6. For `segments[]`, translate the full unit first, then fill each segment so the styled Minecraft component still reads naturally.",
-        "7. Refresh `translation_progress.md` after each translated batch.",
-        "8. Run `merge-translations` after enough parts are translated, then validate and export from the merged file or the project root.",
+        "7. When translation equals raw, set an approved review_status and concrete review_reason; otherwise it remains incomplete.",
+        "8. Keep one translation and canonical keys across every context.identity_coupled group.",
+        "9. Refresh `translation_progress.md` after each translated batch.",
+        "10. Run `merge-translations`, `validate-units`, and `qa-translations` before export.",
         "",
     ]
     (out_dir / "translation_instructions.md").write_text("\n".join(instructions), encoding="utf-8")
@@ -1093,6 +1257,8 @@ def export_table(args: argparse.Namespace) -> int:
         "source_kind",
         "raw",
         "translation",
+        "review_status",
+        "review_reason",
         "protected",
         "notes",
         "source_file",
@@ -1125,6 +1291,7 @@ def import_table(args: argparse.Namespace) -> int:
             line = reader.line_num
             errors.extend(replacement_character_errors(row.get("translation", ""), "TSV translation", line))
             errors.extend(replacement_character_errors(row.get("notes", ""), "TSV notes", line))
+            errors.extend(replacement_character_errors(row.get("review_reason", ""), "TSV review_reason", line))
             row_id = str(row.get("id", "")).strip()
             if row_id:
                 updates[row_id] = row
@@ -1139,12 +1306,18 @@ def import_table(args: argparse.Namespace) -> int:
             continue
         translation = update.get("translation", "")
         notes = update.get("notes", "")
+        review_status = str(update.get("review_status", "")).strip()
+        review_reason = str(update.get("review_reason", "")).strip()
         if translation or args.allow_empty_translation:
             if row.get("translation") != translation:
                 changed += 1
             row["translation"] = translation
         if notes:
             row["notes"] = notes
+        if review_status:
+            row["review_status"] = review_status
+        if review_reason:
+            row["review_reason"] = review_reason
 
     write_jsonl(out, base_rows)
     print(f"translations: {out}")
@@ -1168,9 +1341,13 @@ def export_segment_table(args: argparse.Namespace) -> int:
         "json_path",
         "raw",
         "translation",
+        "review_status",
+        "review_reason",
         "translation_key",
         "unit_raw",
         "unit_translation",
+        "unit_review_status",
+        "unit_review_reason",
         "source_kind",
         "source_file",
         "confidence",
@@ -1195,9 +1372,13 @@ def export_segment_table(args: argparse.Namespace) -> int:
                         "json_path": segment.get("json_path", ""),
                         "raw": segment.get("raw", ""),
                         "translation": segment.get("translation", ""),
+                        "review_status": segment.get("review_status", ""),
+                        "review_reason": segment.get("review_reason", ""),
                         "translation_key": segment.get("translation_key", ""),
                         "unit_raw": row.get("raw", ""),
                         "unit_translation": row.get("translation", ""),
+                        "unit_review_status": row.get("review_status", ""),
+                        "unit_review_reason": row.get("review_reason", ""),
                         "source_kind": row.get("source_kind", ""),
                         "source_file": row.get("source_file", ""),
                         "confidence": row.get("confidence", ""),
@@ -1215,8 +1396,8 @@ def import_segment_table(args: argparse.Namespace) -> int:
     table_path = Path(args.table).resolve()
     out = Path(args.out).resolve()
     by_id = {str(row.get("id", "")): row for row in base_rows}
-    updates: dict[tuple[str, int], str] = {}
-    unit_translation_updates: dict[str, str] = {}
+    updates: dict[tuple[str, int], dict[str, str]] = {}
+    unit_translation_updates: dict[str, dict[str, str]] = {}
     errors: list[str] = []
 
     with table_path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -1226,6 +1407,8 @@ def import_segment_table(args: argparse.Namespace) -> int:
             errors.extend(replacement_character_errors(row.get("translation", ""), "TSV segment translation", line))
             errors.extend(replacement_character_errors(row.get("unit_translation", ""), "TSV unit_translation", line))
             errors.extend(replacement_character_errors(row.get("notes", ""), "TSV notes", line))
+            errors.extend(replacement_character_errors(row.get("review_reason", ""), "TSV segment review_reason", line))
+            errors.extend(replacement_character_errors(row.get("unit_review_reason", ""), "TSV unit review_reason", line))
             unit_id = str(row.get("unit_id", "")).strip()
             if not unit_id:
                 continue
@@ -1235,20 +1418,30 @@ def import_segment_table(args: argparse.Namespace) -> int:
                 continue
             translation = row.get("translation", "")
             if translation or args.allow_empty_translation:
-                updates[(unit_id, index)] = translation
+                updates[(unit_id, index)] = {
+                    "translation": translation,
+                    "review_status": str(row.get("review_status", "")).strip(),
+                    "review_reason": str(row.get("review_reason", "")).strip(),
+                }
             unit_translation = row.get("unit_translation", "")
             if unit_translation:
-                unit_translation_updates[unit_id] = unit_translation
+                unit_translation_updates[unit_id] = {
+                    "translation": unit_translation,
+                    "review_status": str(row.get("unit_review_status", "")).strip(),
+                    "review_reason": str(row.get("unit_review_reason", "")).strip(),
+                }
     if errors:
         print_blocking_errors(errors, f"segment table import blocked: {len(errors)} encoding error(s)")
         return 1
 
     changed = 0
-    for unit_id, unit_translation in unit_translation_updates.items():
+    for unit_id, unit_update in unit_translation_updates.items():
         row = by_id.get(unit_id)
-        if row is not None and row.get("translation") != unit_translation:
-            row["translation"] = unit_translation
-            changed += 1
+        if row is not None:
+            for field, value in unit_update.items():
+                if value and row.get(field) != value:
+                    row[field] = value
+                    changed += 1
 
     for unit_id, index in sorted(updates):
         row = by_id.get(unit_id)
@@ -1259,10 +1452,10 @@ def import_segment_table(args: argparse.Namespace) -> int:
         for segment in segments:
             if segment.get("index") != index:
                 continue
-            translation = updates[(unit_id, index)]
-            if segment.get("translation") != translation:
-                segment["translation"] = translation
-                changed += 1
+            for field, value in updates[(unit_id, index)].items():
+                if (value or (field == "translation" and args.allow_empty_translation)) and segment.get(field) != value:
+                    segment[field] = value
+                    changed += 1
             break
 
     write_jsonl(out, base_rows)
@@ -1296,6 +1489,11 @@ def merge_segment_updates(base_row: dict[str, Any], update_row: dict[str, Any], 
         if key and target.get("translation_key") != key:
             target["translation_key"] = key
             changed += 1
+        for field in ("review_status", "review_reason"):
+            value = str(update_segment.get(field, "")).strip()
+            if value and target.get(field) != value:
+                target[field] = value
+                changed += 1
     return changed
 
 
@@ -1339,6 +1537,13 @@ def apply_translation_updates(
             base["notes"] = notes
             changed += 1
             updated_ids.add(row_id)
+
+        for field in ("review_status", "review_reason"):
+            value = str(update.get(field, "")).strip()
+            if value and base.get(field) != value:
+                base[field] = value
+                changed += 1
+                updated_ids.add(row_id)
 
         update_segments = update.get("segments")
         if isinstance(update_segments, list):
@@ -1454,23 +1659,31 @@ def translation_status(args: argparse.Namespace) -> int:
         )
 
     translated = [row for row in rows if str(row.get("translation", "")).strip()]
+    complete = [row for row in rows if row_translation_complete(row)]
+    review_states = Counter(translation_review_state(row) for row in rows)
     hybrid = [row for row in rows if "hybrid-key-injection" in row.get("mode_support", [])]
     segment_units = [row for row in rows if segment_entries(row)]
     translated_segments = 0
     total_segments = 0
+    segment_review_states: Counter[str] = Counter()
     for row in segment_units:
         for segment in segment_entries(row):
             total_segments += 1
+            segment_review_states[translation_review_state(segment)] += 1
             if str(segment.get("translation", "")).strip():
                 translated_segments += 1
 
     by_kind: dict[str, dict[str, int]] = {}
     for row in rows:
         kind = str(row.get("source_kind", "unknown"))
-        item = by_kind.setdefault(kind, {"total": 0, "translated": 0})
+        item = by_kind.setdefault(kind, {"total": 0, "translated": 0, "complete": 0, "unreviewed_same_as_source": 0})
         item["total"] += 1
         if str(row.get("translation", "")).strip():
             item["translated"] += 1
+        if row_translation_complete(row):
+            item["complete"] += 1
+        if translation_review_state(row) == "unreviewed_same_as_source":
+            item["unreviewed_same_as_source"] += 1
 
     by_source: list[dict[str, Any]] = []
     rows_by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1478,21 +1691,34 @@ def translation_status(args: argparse.Namespace) -> int:
         rows_by_source[str(row.get("source_file", ""))].append(row)
     for source_file, source_rows in rows_by_source.items():
         count = len(source_rows)
-        done = sum(1 for row in source_rows if str(row.get("translation", "")).strip())
+        done = sum(1 for row in source_rows if row_translation_complete(row))
         if not args.incomplete_only or done < count:
-            by_source.append({"source_file": source_file, "total": count, "translated": done, "remaining": count - done})
+            by_source.append(
+                {
+                    "source_file": source_file,
+                    "total": count,
+                    "complete": done,
+                    "remaining": count - done,
+                    "unreviewed_same_as_source": sum(
+                        1 for row in source_rows if translation_review_state(row) == "unreviewed_same_as_source"
+                    ),
+                }
+            )
     by_source.sort(key=lambda item: (-int(item["remaining"]), str(item["source_file"])))
 
     status = {
-        "schema": "mc-map-translate-status.v1",
+        "schema": "mc-map-translate-status.v2",
         "created_at": utc_now(),
         "total_units": len(rows),
         "translated_units": len(translated),
-        "remaining_units": len(rows) - len(translated),
+        "complete_units": len(complete),
+        "remaining_units": len(rows) - len(complete),
+        "review_states": dict(sorted(review_states.items())),
         "hybrid_units": len(hybrid),
         "segment_units": len(segment_units),
         "translated_segments": translated_segments,
         "total_segments": total_segments,
+        "segment_review_states": dict(sorted(segment_review_states.items())),
         "by_source_kind": dict(sorted(by_kind.items())),
         "top_sources": by_source[: args.top_sources],
     }
@@ -1501,6 +1727,126 @@ def translation_status(args: argparse.Namespace) -> int:
         write_json(Path(args.out).resolve(), status)
     print(json.dumps(status, ensure_ascii=False, indent=2))
     return 0
+
+
+def write_translation_qa_markdown(path: Path, report: dict[str, Any]) -> None:
+    lines = [
+        "# Translation QA",
+        "",
+        f"- Status: **{report['status']}**",
+        f"- Units: {report['total_units']}",
+        f"- Complete units: {report['complete_units']}",
+        f"- Unreviewed same-as-source slots: {report['unreviewed_same_as_source_count']}",
+        f"- Identity groups: {report['identity_qa']['group_count']}",
+        f"- Identity conflicts: {report['identity_qa']['conflict_count']}",
+        f"- Sign faces: {report['sign_qa']['face_count']}",
+        f"- Complete sign faces: {report['sign_qa']['complete_face_count']}",
+        "",
+    ]
+    if report.get("blocking_reasons"):
+        lines.extend(["## Blocking Reasons", ""])
+        for reason in report["blocking_reasons"]:
+            lines.append(f"- {reason}")
+        lines.append("")
+    if report.get("unreviewed_same_as_source"):
+        lines.extend(["## Unreviewed Same As Source", ""])
+        for item in report["unreviewed_same_as_source"][:100]:
+            lines.append(
+                f"- `{item.get('id', '')}` `{item.get('source_kind', '')}` `{item.get('source_file', '')}` "
+                f"{item.get('field', 'translation')}: `{raw_preview(str(item.get('raw', '')), 180)}`"
+            )
+        lines.append("")
+    if report["identity_qa"].get("conflicts"):
+        lines.extend(["## Identity Conflicts", ""])
+        for item in report["identity_qa"]["conflicts"][:50]:
+            lines.append(
+                f"- `{item.get('identity_group', '')}` units={len(item.get('unit_ids', []))} "
+                f"key_conflicts={len(item.get('key_conflicts', {}))} "
+                f"translation_conflicts={len(item.get('translation_conflicts', {}))}"
+            )
+        lines.append("")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def qa_translations(args: argparse.Namespace) -> int:
+    rows = read_jsonl(Path(args.translations).resolve())
+    validation_errors: list[str] = []
+    review_states: Counter[str] = Counter()
+    unreviewed: list[dict[str, Any]] = []
+    for row in rows:
+        validation_errors.extend(validate_unit(row))
+        state = translation_review_state(row)
+        review_states[state] += 1
+        if state == "unreviewed_same_as_source":
+            unreviewed.append(
+                {
+                    "id": row.get("id", ""),
+                    "field": "translation",
+                    "raw": row.get("raw", ""),
+                    "source_kind": row.get("source_kind", ""),
+                    "source_file": row.get("source_file", ""),
+                }
+            )
+        for segment in segment_entries(row):
+            segment_state = translation_review_state(segment)
+            review_states[f"segment:{segment_state}"] += 1
+            if segment_state == "unreviewed_same_as_source":
+                unreviewed.append(
+                    {
+                        "id": row.get("id", ""),
+                        "field": f"segments[{segment.get('index', '')}].translation",
+                        "raw": segment.get("raw", ""),
+                        "source_kind": row.get("source_kind", ""),
+                        "source_file": row.get("source_file", ""),
+                    }
+                )
+
+    complete_rows = [row for row in rows if row_translation_complete(row)]
+    sign_rows = [row for row in rows if str(row.get("source_kind", "")) == "sign"]
+    identity_qa = identity_consistency_report(rows)
+    blocking_reasons: list[str] = []
+    if validation_errors:
+        blocking_reasons.append(f"{len(validation_errors)} structural, encoding, protected-token, or review validation error(s)")
+    if len(complete_rows) != len(rows) and not args.allow_incomplete:
+        blocking_reasons.append(f"{len(rows) - len(complete_rows)} unit(s) are incomplete or unreviewed")
+    if unreviewed:
+        blocking_reasons.append(f"{len(unreviewed)} unchanged source slot(s) lack an approved status and reason")
+    if identity_qa["conflict_count"]:
+        blocking_reasons.append(f"{identity_qa['conflict_count']} identity-coupled group(s) have conflicting keys or translations")
+
+    report = {
+        "schema": "mc-map-translation-qa.v1",
+        "created_at": utc_now(),
+        "translations_file": str(Path(args.translations).resolve()),
+        "status": "pass" if not blocking_reasons else "blocked",
+        "allow_incomplete": bool(args.allow_incomplete),
+        "total_units": len(rows),
+        "complete_units": len(complete_rows),
+        "remaining_units": len(rows) - len(complete_rows),
+        "review_states": dict(sorted(review_states.items())),
+        "unreviewed_same_as_source_count": len(unreviewed),
+        "unreviewed_same_as_source": unreviewed[:500],
+        "validation_error_count": len(validation_errors),
+        "validation_errors": validation_errors[:500],
+        "identity_qa": identity_qa,
+        "sign_qa": {
+            "face_count": len(sign_rows),
+            "complete_face_count": sum(1 for row in sign_rows if row_translation_complete(row)),
+            "segment_count": sum(len(segment_entries(row)) for row in sign_rows),
+            "complete_segment_count": sum(
+                1 for row in sign_rows for segment in segment_entries(row) if translation_item_complete(segment)
+            ),
+        },
+        "blocking_reasons": blocking_reasons,
+    }
+    out = Path(args.out).resolve()
+    write_json(out, report)
+    markdown_path = out.with_suffix(".md")
+    write_translation_qa_markdown(markdown_path, report)
+    print(f"qa_report: {out}")
+    print(f"qa_review: {markdown_path}")
+    print(f"status: {report['status']}")
+    return 0 if not blocking_reasons else 4
 
 
 def write_progress_todo(args: argparse.Namespace) -> int:
@@ -1636,6 +1982,15 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--top-sources", type=int, default=20, help="number of source files to include")
     status.add_argument("--out", default="", help="optional JSON report output")
     status.set_defaults(func=translation_status)
+
+    qa = subparsers.add_parser(
+        "qa-translations",
+        help="block delivery on incomplete/unreviewed translations or identity-coupled key conflicts",
+    )
+    qa.add_argument("translations", help="translations JSONL, parts directory, or project directory")
+    qa.add_argument("--out", required=True, help="output QA JSON report; a Markdown review is written beside it")
+    qa.add_argument("--allow-incomplete", action="store_true", help="allow empty translations for an interim QA run")
+    qa.set_defaults(func=qa_translations)
 
     todo = subparsers.add_parser("write-progress-todo", help="write or refresh the persistent translation progress TODO file")
     todo.add_argument("project", help="indexed project work directory containing index/manifest.json")

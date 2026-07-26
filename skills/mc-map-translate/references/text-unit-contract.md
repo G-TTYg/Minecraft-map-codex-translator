@@ -13,6 +13,8 @@ Use JSON Lines (`.jsonl`). Each non-empty line is one text unit.
   "address": {},
   "raw": "Find the ancient key",
   "translation": "",
+  "review_status": "",
+  "review_reason": "",
   "translation_key": "mcmap.example.command_block.stable-id",
   "resource_namespace": "mcmap",
   "source_locale": "en_us",
@@ -34,6 +36,8 @@ Use JSON Lines (`.jsonl`). Each non-empty line is one text unit.
 - `address`: Structured anchor. Include `block_pos`, `entity_uuid`, `chunk`, `nbt_path`, `json_path`, `json_string_path`, `function_id`, `function_line`, `function_macro`, `command_span`, `command_json_path`, `command_string_span`, `command_plain_span`, `sign_lines`, or `lang_key` as applicable.
 - `raw`: Exact source string or exact player-facing segment.
 - `translation`: Target language translation.
+- `review_status`: Review classification. Use `translated` for an optional explicit changed-text marker. When translation deliberately equals source, use exactly one of `intentional_name`, `code`, `ascii_art`, or `puzzle_token`. `unreviewed_same_as_source` is a blocking computed/interim state, not approval.
+- `review_reason`: Concrete reason for deliberately retaining source text. Required when `translation == raw`; examples: "canonical player name", "redstone label consumed as a code", or "ASCII divider has no linguistic content".
 - `translation_key`: Language key used or proposed for resource-pack export.
 - `resource_namespace`: Java resource-pack namespace to write under `assets/<resource_namespace>/lang/<target_locale>.json`.
 - `source_locale`: Source locale for language JSON units, normally `en_us` unless the user specifies another source.
@@ -108,6 +112,25 @@ For aggregated sign faces, one `sign` unit may represent four physical sign line
 
 Codex should translate the complete sign first, then fill each segment so the copied-map apply step can replace each original line/text node with a `translate` key.
 
+A face with only one non-empty player-text line is still one aggregated sign unit. `context.line_texts` must contain four slots, and `address.sign_lines[]` should preserve all four parsable physical line anchors, including blank lines. Record `address.block_pos` (`x`, `y`, `z`) when the surrounding block entity provides it; the NBT path remains the exact apply anchor while coordinates provide a stable cross-check.
+
+## Identity-Coupled Text
+
+Item display text can also participate in gameplay identity. Scanner output may add:
+
+```json
+{
+  "context": {
+    "identity_coupled": true,
+    "identity_group": "stable-group-id",
+    "identity_role": "trade_input",
+    "identity_text_shape": ["Kitatcho Coin"]
+  }
+}
+```
+
+Common roles are `trade_input`, `trade_output`, `producer`, `consumer`, and `item_component`. Rows in the same identity group must use the same unit key and matching segment keys. Do not regenerate these keys from occurrence anchors. The current static group is based on source kind and visible text-node shape; it protects equivalent display components but does not prove complete item/NBT equality, so in-game trade and predicate tests remain required.
+
 ## Binary Anchors
 
 For `.dat` and `.mca` sources, `address` may include:
@@ -150,9 +173,12 @@ Final translation files may contain the same schema with `translation` filled. F
 - `resource-pack` units must include `translation_key`.
 - `resource_namespace` should be present for every unit that can be exported to a resource pack.
 - `translation` must preserve every protected token exactly.
+- A non-empty changed translation is `translated`. A source-equal translation is incomplete unless it has an approved preserve `review_status` and non-empty `review_reason`.
 - `translation` must preserve escape shape: do not replace a real newline with literal `\\n`, and do not replace literal `\\n` with a real newline unless the row is deliberately rewritten and documented.
 - `segments[].json_path` and `segments[].raw` must match `context.text_nodes`.
 - Sign segments may also include `nbt_path`, `line_index`, and `component_json_path`; keep these unchanged during translation.
+- Segment-level source-equal text follows the same status/reason rule as the full unit.
+- Identity-coupled rows in one group must not contain conflicting unit/segment translation keys or translations.
 - `segments[].translation_key` must use only lowercase `a-z`, digits, `_`, `.`, and `-`.
 - `edition` must be `java`.
 - JSON strings must remain valid UTF-8.

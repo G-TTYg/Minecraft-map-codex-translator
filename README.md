@@ -19,6 +19,8 @@ It can help with:
 - `.mcfunction` files, including common `execute ... run ...` command chains;
 - datapack JSON, storage-like JSON/SNBT, item names, lore, books, and sign text;
 - supported `.dat` NBT and `.mca` region/chunk text;
+- whole sign-face units with four-line context and block-position cross-checks;
+- identity-coupled item names/lore used by villager offers, rewards, `clear`, and item predicates;
 - residual-English QA after export.
 
 Bedrock Edition is not supported.
@@ -95,9 +97,11 @@ Codex should follow this flow for real maps:
 7. Maintain `translation_progress.md` as the persistent TODO list.
 8. Translate one contextual workpack at a time.
 9. Merge staged translations.
-10. Validate units, encoding, escapes, placeholders, and Minecraft structures.
-11. Export the selected mode.
-12. Run apply reports and residual-English QA where relevant.
+10. Classify every deliberate source-equal result with a review status and reason.
+11. Run blocking translation/sign/identity QA.
+12. Export the selected mode.
+13. Run apply reports and target-locale residual-English QA.
+14. Generate one `exports/DELIVERY.md` naming the canonical output.
 
 Codex should not load the entire map into the model context. The scanner creates a searchable/indexed project so Codex can load only the relevant workpack, source summaries, and nearby context for each translation batch.
 
@@ -133,6 +137,8 @@ Many Java maps already contain `resources.zip`. The plugin treats that file as t
 
 When exporting a copied map with embedded resources, the generated translation pack is merged into the copied existing `resources.zip` by default. This preserves textures, sounds, fonts, models, custom item assets, visual UI assets, and the original `pack.mcmeta` from the original map.
 
+For `hybrid-keyed-copy`, if the source already contains `resources.zip`, the apply command requires `--resource-pack` so generated language keys are merged into it. `--allow-separate-resource-pack` is available only for an intentional manual separate-pack delivery.
+
 Do not replace an existing `resources.zip` with a translation-only pack unless you intentionally want to discard the original map pack. For standalone exports, `resource-pack-only` can be a small overlay pack, but a merged full pack is better when players should not manage both the original map pack and a translation overlay.
 
 ## Common Commands
@@ -157,6 +163,7 @@ Merge translated workpacks:
 ```bash
 python skills/mc-map-translate/scripts/mcmap_contract.py merge-translations work/map/translations/parts --base work/map/translation_units.jsonl --out work/map/translations/translations.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py validate-units work/map/translations/translations.jsonl
+python skills/mc-map-translate/scripts/mcmap_contract.py qa-translations work/map --out work/map/qa/translation_qa.json
 ```
 
 Build a standalone resource pack:
@@ -183,7 +190,8 @@ python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-direct-text wor
 Audit exported output:
 
 ```bash
-python skills/mc-map-translate/scripts/mcmap_java_tools.py audit-english work/map/exports/world-keyed.zip --out work/map/qa/residual_english_audit.json
+python skills/mc-map-translate/scripts/mcmap_java_tools.py audit-english work/map/exports/world-keyed.zip --out work/map/qa/residual_english_audit.json --target-locale zh_cn --source-locale en_us
+python skills/mc-map-translate/scripts/mcmap_java_tools.py write-delivery work/map --mode hybrid-keyed-copy --primary-output work/map/exports/world-keyed.zip --translation-qa work/map/qa/translation_qa.json --residual-audit work/map/qa/residual_english_audit.json --apply-report work/map/exports/world-keyed.zip.mcmap_hybrid_apply_report.json
 ```
 
 ## Project Layout
@@ -203,6 +211,7 @@ A normal scan creates:
 - `translations/translations.jsonl`: merged canonical translation file;
 - `exports/`: generated resource packs and copied map outputs;
 - `qa/`: residual-English audits and QA reports.
+- `exports/DELIVERY.md`: the exact mode and single canonical artifact users should install/play.
 
 ## Translation Quality Rules
 
@@ -212,6 +221,8 @@ Codex should:
 - preserve command syntax, selectors, score names, NBT paths, JSON keys, placeholders, colors, click events, hover events, fonts, keybinds, and formatting;
 - keep terminology consistent through `glossary.md`;
 - translate grouped signs/components as complete messages before filling segment-level translations;
+- never count `translation == raw` as reviewed unless `review_status` is `intentional_name`, `code`, `ascii_art`, or `puzzle_token` and `review_reason` explains why;
+- keep scanner-generated canonical keys for `identity_coupled` item names/lore;
 - preserve escape semantics such as real newlines versus literal `\\n`;
 - treat UTF-8 and multilingual text carefully, especially on Windows terminals;
 - report uncovered text honestly instead of claiming false coverage.
@@ -224,6 +235,8 @@ Codex should not call external translation APIs, browser translators, or third-p
 - Resource packs cannot translate arbitrary hardcoded literals unless the copied map is patched to use translation keys.
 - PNG textures, custom bitmap fonts, map art, and model textures may contain visual English that requires separate asset localization or manual QA.
 - Direct text replacement is intentionally separate from hybrid key injection because it has a higher risk profile.
+- Static identity QA verifies key/translation consistency, but villager trades, `clear`, predicates, quest items, and named-NPC selectors still need fresh-save in-game tests.
+- Visual asset hints use path filtering; OCR or visual inspection is still required to confirm text baked into PNG/font/map-art assets.
 - Parser coverage for unusual binary/NBT forms may be reported as pending rather than guessed.
 
 ## Development Validation
@@ -232,6 +245,7 @@ Run these checks before publishing plugin changes:
 
 ```bash
 python -m py_compile skills/mc-map-translate/scripts/mcmap_java_tools.py skills/mc-map-translate/scripts/mcmap_contract.py
+python -m unittest discover -s tests -v
 python path/to/skill-creator/scripts/quick_validate.py skills/mc-map-translate
 python path/to/plugin-creator/scripts/validate_plugin.py .
 ```

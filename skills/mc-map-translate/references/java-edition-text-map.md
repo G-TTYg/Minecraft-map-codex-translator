@@ -62,6 +62,8 @@ High risk:
 Plain `nbt_text`, `storage_text`, `say`, and low-confidence custom JSON units without JSON text component context are not hybrid key-injection targets. They can be applied only through explicit `embedded-direct` copied-world output with `apply-direct-text`, or left as known uncovered text in a resource-pack-first workflow.
 `sign` units may represent an entire sign face. Translate `raw` as the whole four-line sign, then fill `segments[]` so each line/text node can be written back safely.
 
+`item_name` and `item_lore` can be both display text and identity data. If they occur in villager offers, generated rewards, containers, `give`/`loot`/`item replace`, `clear`, `execute if items`, or predicates, treat scanner `identity_coupled` metadata as a hard constraint. Equal source text shapes must retain one canonical translation key; occurrence-specific keys can make visually identical items structurally unequal.
+
 ## Translation Key Strategy
 
 For generated keys, use:
@@ -83,3 +85,13 @@ Keep original keys for `lang` units. Generated keys are for hybrid key injection
 - Translation keys themselves during residual-English audit. A dotted key like `mcmap.example.sign.abc123` is not visible English copy.
 
 When false positives dominate a source folder, use `make-workpacks --source-file-regex` or TSV filtering to isolate the useful units rather than editing scanner output by hand.
+
+## Identity Failure Modes
+
+- a villager refuses translated currency because offer and inventory item use different `translate` keys;
+- `clear` cannot consume a translated quest key;
+- `execute if items` or a predicate stops matching a reward;
+- an NPC selector based on `CustomName` stops finding its target;
+- unrelated items with the same short name are incorrectly merged despite different lore/custom data.
+
+Static key consistency prevents the first class of accidental divergence but does not prove full item equality. Keep exact anchors, inspect non-text components, and perform fresh-save in-game tests for every identity-sensitive workflow.

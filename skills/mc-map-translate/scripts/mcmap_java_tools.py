@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-from mcmap_contract import ensure_segments, make_project_files, normalize_key_piece, print_blocking_errors, read_jsonl, require_locale, stable_id, unit_encoding_errors, utc_now, write_json
+from mcmap_contract import ensure_segments, make_project_files, normalize_key_piece, print_blocking_errors, read_jsonl, require_locale, row_translation_complete, stable_id, translation_item_complete, unit_encoding_errors, utc_now, write_json
 
 
 LANG_PATH_RE = re.compile(r"(?:^|.*[!/])assets/([^/]+)/lang/([a-z]{2,3}_[a-z0-9]{2,8})\.json$")
@@ -67,7 +67,7 @@ PLAIN_TEXT_PATH_HINTS = {
     "filtered_title",
 }
 COMMAND_START_RE = re.compile(
-    r"^\s*/?\s*(tellraw|title|bossbar|scoreboard|team|summon|data|item|loot|give|setblock|execute|say|tell|msg|w|function)\b",
+    r"^\s*/?\s*(tellraw|title|bossbar|scoreboard|team|summon|data|item|loot|give|clear|setblock|execute|say|tell|msg|w|function)\b",
     re.I,
 )
 SIGN_NEW_TEXT_RE = re.compile(r"^(?P<base>.*\.(?:front_text|back_text)\.messages)\[(?P<index>[0-3])\]$", re.I)
@@ -76,6 +76,10 @@ ENGLISH_WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z']{2,}\b")
 RESOURCE_PNG_RE = re.compile(r"(?:^|[!/])assets/[^/]+/.+\.png$", re.I)
 RESOURCE_FONT_JSON_RE = re.compile(r"(?:^|[!/])assets/[^/]+/font/.+\.json$", re.I)
 RESOURCE_MODEL_JSON_RE = re.compile(r"(?:^|[!/])assets/[^/]+/models/.+\.json$", re.I)
+VISUAL_TEXT_PATH_HINT_RE = re.compile(
+    r"(?:^|[/_.-])(text|font|title|subtitle|logo|sign|poster|banner|menu|gui|ui|tutorial|instruction|rule|dialog|quest|book|letter|label|notice)(?:$|[/_.-])",
+    re.I,
+)
 SNBT_TEXT_KEYS = {
     "customname",
     "custom_name",
@@ -145,6 +149,9 @@ JSON_TEXT_PATH_HINTS = {
     "hints",
 }
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
+IDENTITY_COUPLED_SOURCE_KINDS = {"item_name", "item_lore"}
+IDENTITY_PRODUCER_COMMANDS = {"give", "loot", "item", "summon", "setblock"}
+IDENTITY_CONSUMER_COMMANDS = {"clear", "execute_if_items"}
 
 
 @dataclass(frozen=True)
@@ -159,6 +166,7 @@ class NbtString:
     path: str
     value: str
     chunk: dict[str, int] | None = None
+    block_pos: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -798,7 +806,9 @@ def snbt_key_is_player_text(key: str) -> bool:
 
 def source_kind_from_snbt_key(key: str, fallback: str) -> str:
     lowered = key.lower()
-    if "customname" in lowered or "custom_name" in lowered:
+    if "custom_name" in lowered:
+        return "item_name"
+    if "customname" in lowered:
         return "entity_name"
     if "lore" in lowered:
         return "item_lore"
@@ -997,6 +1007,8 @@ def make_unit(
         "address": address,
         "raw": raw,
         "translation": "",
+        "review_status": "",
+        "review_reason": "",
         "translation_key": translation_key,
         "resource_namespace": resource_namespace,
         "source_locale": source_locale,
@@ -1017,6 +1029,69 @@ def generated_key(namespace: str, map_slug: str, source_kind: str, unit_id: str)
             normalize_key_piece(unit_id),
         ]
     )
+
+
+def identity_text_shape(row: dict[str, Any]) -> list[str]:
+    context = row.get("context") if isinstance(row.get("context"), dict) else {}
+    nodes = context.get("text_nodes") if isinstance(context, dict) else []
+    if isinstance(nodes, list):
+        texts = [str(node.get("text", "")) for node in nodes if isinstance(node, dict)]
+        if texts:
+            return texts
+    return [str(row.get("raw", ""))]
+
+
+def identity_role_for_row(row: dict[str, Any]) -> str:
+    address = row.get("address") if isinstance(row.get("address"), dict) else {}
+    path = str(address.get("nbt_path", "")).lower()
+    if ".offers.recipes[" in path:
+        if re.search(r"\.(?:buy|buyb)(?:\.|$)", path):
+            return "trade_input"
+        if re.search(r"\.sell(?:\.|$)", path):
+            return "trade_output"
+    context = row.get("context") if isinstance(row.get("context"), dict) else {}
+    command = str(context.get("identity_command", "")).lower()
+    if command in IDENTITY_PRODUCER_COMMANDS:
+        return "producer"
+    if command in IDENTITY_CONSUMER_COMMANDS:
+        return "consumer"
+    return "item_component"
+
+
+def canonicalize_identity_keys(rows: list[dict[str, Any]], namespace: str, map_slug: str) -> dict[str, Any]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        source_kind = str(row.get("source_kind", ""))
+        if source_kind not in IDENTITY_COUPLED_SOURCE_KINDS:
+            continue
+        shape = identity_text_shape(row)
+        group_id = stable_id("identity-coupled", source_kind, json.dumps(shape, ensure_ascii=False))
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        context["identity_coupled"] = True
+        context["identity_group"] = group_id
+        context["identity_role"] = identity_role_for_row(row)
+        context["identity_text_shape"] = shape
+        row["context"] = context
+        groups[group_id].append(row)
+
+    for group_id, group_rows in groups.items():
+        source_kind = normalize_key_piece(str(group_rows[0].get("source_kind", "item_text")))
+        canonical_key = ".".join(
+            [normalize_key_piece(namespace), normalize_key_piece(map_slug), "identity", source_kind, group_id]
+        )
+        for row in group_rows:
+            if "hybrid-key-injection" in row.get("mode_support", []):
+                row["translation_key"] = canonical_key
+                for segment in row_segments(row):
+                    index = int(segment.get("index", 0))
+                    segment["translation_key"] = f"{canonical_key}.part_{index}"
+
+    return {
+        "unit_count": sum(len(group) for group in groups.values()),
+        "group_count": len(groups),
+        "repeated_group_count": sum(1 for group in groups.values() if len(group) > 1),
+        "max_group_size": max((len(group) for group in groups.values()), default=0),
+    }
 
 
 def scan_lang_file(entry: Entry, source_locale: str) -> list[dict[str, Any]]:
@@ -1443,6 +1518,11 @@ def extract_text_components(
 
 
 def infer_command_source_kind(line: str, fallback: str = "function") -> str:
+    full_lowered = line.lower()
+    if "custom_name" in full_lowered or "minecraft:item_name" in full_lowered:
+        return "item_name"
+    if "lore" in full_lowered:
+        return "item_lore"
     stripped = normalize_command_line(line)
     execute_tail = execute_run_tail(stripped)
     if execute_tail:
@@ -1464,8 +1544,6 @@ def infer_command_source_kind(line: str, fallback: str = "function") -> str:
         return "team"
     if "customname" in lowered:
         return "entity_name"
-    if "lore" in lowered:
-        return "item_lore"
     if "display" in lowered and "name" in lowered:
         return "item_name"
     return fallback
@@ -1649,6 +1727,15 @@ def scan_command_line(
             occupied_spans=[span for span in occupied_spans if len(span) == 2],
         )
     )
+    lowered_line = normalize_command_line(line).lower()
+    identity_command = "execute_if_items" if re.search(r"\bexecute\s+if\s+items\b", lowered_line) else command_word(line)
+    if identity_command:
+        for row in units:
+            if str(row.get("source_kind", "")) not in IDENTITY_COUPLED_SOURCE_KINDS:
+                continue
+            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            context["identity_command"] = identity_command
+            row["context"] = context
     return units
 
 
@@ -1911,10 +1998,55 @@ def decompress_dat_payload(data: bytes) -> bytes:
     return data
 
 
+def nbt_integer_value(tag: NbtTag) -> int | None:
+    widths = {1: 1, 2: 2, 3: 4, 4: 8}
+    width = widths.get(tag.tag_type)
+    if width is None:
+        return None
+    data = bytes(tag.value)
+    if len(data) != width:
+        return None
+    return int.from_bytes(data, "big", signed=True)
+
+
+def compound_block_pos(tag: NbtTag) -> dict[str, int] | None:
+    if tag.tag_type != 10:
+        return None
+    values = {name.lower(): child for name, child in tag.value}
+    coords = {axis: nbt_integer_value(values[axis]) for axis in ("x", "y", "z") if axis in values}
+    if len(coords) != 3 or any(value is None for value in coords.values()):
+        return None
+    return {axis: int(coords[axis]) for axis in ("x", "y", "z")}
+
+
+def collect_nbt_strings(
+    tag: NbtTag,
+    path: str,
+    out: list[NbtString],
+    *,
+    chunk: dict[str, int] | None,
+    block_pos: dict[str, int] | None = None,
+) -> None:
+    if tag.tag_type == 8:
+        out.append(NbtString(path=path, value=str(tag.value), chunk=chunk, block_pos=block_pos))
+        return
+    if tag.tag_type == 9:
+        _child_type, items = tag.value
+        for index, child in enumerate(items):
+            collect_nbt_strings(child, f"{path}[{index}]", out, chunk=chunk, block_pos=block_pos)
+        return
+    if tag.tag_type == 10:
+        current_pos = compound_block_pos(tag) or block_pos
+        for name, child in tag.value:
+            child_path = f"{path}.{name}" if path else name
+            collect_nbt_strings(child, child_path, out, chunk=chunk, block_pos=current_pos)
+
+
 def scan_nbt_strings(data: bytes, chunk: dict[str, int] | None = None) -> list[NbtString]:
-    reader = NbtStringReader(data)
-    strings = reader.scan()
-    return [NbtString(path=path, value=value, chunk=chunk) for path, value in strings]
+    tree = NbtTreeReader(data).read()
+    strings: list[NbtString] = []
+    collect_nbt_strings(tree.root, tree.root_path, strings, chunk=chunk)
+    return strings
 
 
 def region_coords(path: str) -> tuple[int, int] | None:
@@ -1983,6 +2115,14 @@ def source_kind_from_nbt_path(path: str, value: str) -> str:
     if ".command" in lowered or COMMAND_START_RE.match(value):
         return "command_block"
     leaf = nbt_path_leaf(path)
+    if "custom_name" in lowered and (
+        ".components" in lowered
+        or ".items[" in lowered
+        or ".buy" in lowered
+        or ".sell" in lowered
+        or ".tag.display" in lowered
+    ):
+        return "item_name"
     if "customname" in lowered or "custom_name" in lowered:
         return "entity_name"
     if "lore" in lowered:
@@ -2053,6 +2193,23 @@ def parse_component_string(value: str) -> Any | None:
     return obj if is_component_root(obj) else None
 
 
+def collect_all_component_text_nodes(obj: Any, json_path: str = "$") -> list[dict[str, str]]:
+    nodes: list[dict[str, str]] = []
+
+    def visit(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            if isinstance(value.get("text"), str) and value["text"]:
+                nodes.append({"json_path": f"{path}.text", "text": value["text"]})
+            for key, child in value.items():
+                visit(child, f"{path}.{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, f"{path}[{index}]")
+
+    visit(obj, json_path)
+    return nodes
+
+
 def line_synthetic_json_path(line_index: int, component_json_path: str) -> str:
     suffix = component_json_path[1:] if component_json_path.startswith("$") else f".{component_json_path}"
     return f"$.lines[{line_index}]{suffix}"
@@ -2072,17 +2229,17 @@ def build_sign_group_unit(
     sign_lines: list[dict[str, Any]] = []
     grouped_paths: set[str] = set()
     chunk = items[0][1].chunk if items else None
+    block_pos = items[0][1].block_pos if items else None
 
     for line_index, item in sorted(items, key=lambda pair: pair[0]):
         obj = parse_component_string(item.value)
         if obj is None:
             continue
-        context = collect_component_context(obj, "$")
-        component_nodes = context.get("text_nodes", [])
-        if not component_nodes:
-            continue
+        component_nodes = collect_all_component_text_nodes(obj, "$")
         grouped_paths.add(item.path)
         sign_lines.append({"line_index": line_index, "nbt_path": item.path, "json_path": "$"})
+        if not component_nodes:
+            continue
         line_raw = "".join(str(node.get("text", "")) for node in component_nodes if isinstance(node, dict))
         line_texts[line_index] = line_raw
         for node in component_nodes:
@@ -2101,18 +2258,22 @@ def build_sign_group_unit(
                     "component_json_path": component_path,
                     "raw": raw,
                     "translation": "",
+                    "review_status": "",
+                    "review_reason": "",
                     "translation_key": "",
                 }
             )
 
     raw = "\n".join(line_texts).strip("\n")
     player_segments = [segment for segment in segments if is_player_text(str(segment.get("raw", "")))]
-    if len(player_segments) <= 1 or not is_player_text(raw):
+    if not player_segments or not is_player_text(raw):
         return None, set()
 
     address: dict[str, Any] = {"sign_group": base_path, "sign_lines": sign_lines}
     if chunk:
         address["chunk"] = chunk
+    if block_pos:
+        address["block_pos"] = block_pos
     context = {
         "text_nodes": text_nodes,
         "sign_lines": sign_lines,
@@ -2160,6 +2321,8 @@ def scan_nbt_value(
     base_address: dict[str, Any] = {"nbt_path": item.path}
     if item.chunk:
         base_address["chunk"] = item.chunk
+    if item.block_pos:
+        base_address["block_pos"] = item.block_pos
 
     units: list[dict[str, Any]] = []
     if ".command" in item.path.lower() or COMMAND_START_RE.match(value):
@@ -2236,6 +2399,7 @@ def scan_nbt_items(
         chunk_key = json.dumps(item.chunk or {}, sort_keys=True)
         sign_groups[(chunk_key, base_path)].append((line_index, item))
 
+    counters["sign_faces_seen"] += len(sign_groups)
     grouped_sign_paths: set[str] = set()
     for (_chunk_key, base_path), group_items in sign_groups.items():
         unit, paths = build_sign_group_unit(
@@ -2249,6 +2413,8 @@ def scan_nbt_items(
             units.append(unit)
             grouped_sign_paths.update(paths)
             counters["aggregated_sign_groups"] += 1
+        else:
+            counters["sign_faces_without_player_text"] += 1
 
     for item in items:
         if item.path in grouped_sign_paths:
@@ -2356,12 +2522,12 @@ def source_prefix(path: str, depth: int = 5) -> str:
 
 def visual_text_asset_kind(path: str) -> str:
     lowered = path.lower()
-    if RESOURCE_PNG_RE.search(lowered):
-        return "png_texture"
+    if RESOURCE_PNG_RE.search(lowered) and VISUAL_TEXT_PATH_HINT_RE.search(lowered):
+        return "png_text_candidate"
     if RESOURCE_FONT_JSON_RE.search(lowered):
         return "font_provider_json"
-    if RESOURCE_MODEL_JSON_RE.search(lowered):
-        return "model_json"
+    if RESOURCE_MODEL_JSON_RE.search(lowered) and VISUAL_TEXT_PATH_HINT_RE.search(lowered):
+        return "model_text_candidate"
     return ""
 
 
@@ -2461,7 +2627,10 @@ def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, A
         f"- Pending/failed binary files: {len(report['pending_binary_parser_coverage'])}",
         f"- Encoding warnings: {report.get('encoding_warning_count', 0)}",
         f"- Excluded LastOutput strings: {report.get('discovery_counters', {}).get('excluded_last_output', 0)}",
+        f"- Sign faces discovered: {report.get('discovery_counters', {}).get('sign_faces_seen', 0)}",
         f"- Aggregated sign groups: {report.get('discovery_counters', {}).get('aggregated_sign_groups', 0)}",
+        f"- Sign faces without player text: {report.get('discovery_counters', {}).get('sign_faces_without_player_text', 0)}",
+        f"- Identity-coupled units/groups: {report.get('identity_coupled', {}).get('unit_count', 0)}/{report.get('identity_coupled', {}).get('group_count', 0)}",
         f"- Macro function lines: {report.get('discovery_counters', {}).get('macro_function_lines', 0)}",
         f"- Function calls: {report.get('function_call_count', 0)}",
         f"- Suspicious text hints: {report.get('suspicious_text_hint_count', 0)}",
@@ -2513,11 +2682,13 @@ def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, A
         for pack in report["map_resource_packs"][:20]:
             lines.append(f"- `{pack.get('path', '')}` ({pack.get('size', 0)} bytes)")
     visual = report.get("visual_text_asset_hints", {})
-    if visual.get("total", 0):
+    if visual.get("total", 0) or visual.get("png_texture_inventory_count", 0) or visual.get("model_json_inventory_count", 0):
         lines.extend(["", "## Resource-Pack Visual Text Hints", ""])
         lines.append(
-            "These assets may contain player-visible text that language JSON and hybrid key injection cannot cover; inspect or localize images/fonts separately when pursuing full coverage."
+            "PNG/model warnings are path-filtered candidates, not every asset. Confirm candidates with OCR or visual inspection; font providers remain structural leads."
         )
+        lines.append(f"- PNG texture inventory (not all text candidates): {visual.get('png_texture_inventory_count', 0)}")
+        lines.append(f"- Model JSON inventory (not all text candidates): {visual.get('model_json_inventory_count', 0)}")
         for key, count in sorted(visual.get("counts", {}).items()):
             lines.append(f"- `{key}`: {count}")
         for sample in visual.get("samples", [])[:30]:
@@ -2583,6 +2754,8 @@ def scan_source(args: argparse.Namespace) -> int:
     discovery_counters: Counter[str] = Counter()
     visual_counts: Counter[str] = Counter()
     visual_samples: list[dict[str, str]] = []
+    png_texture_inventory_count = 0
+    model_json_inventory_count = 0
     map_resource_packs: list[dict[str, Any]] = []
     suspicious_text_hints: list[dict[str, Any]] = []
     function_calls: list[dict[str, Any]] = []
@@ -2592,6 +2765,10 @@ def scan_source(args: argparse.Namespace) -> int:
         lowered = entry.path.lower()
         if "!" not in entry.path and PurePosixPath(entry.path).name.lower() == "resources.zip":
             map_resource_packs.append({"path": entry.path, "size": entry.size})
+        if RESOURCE_PNG_RE.search(entry.path.lower()):
+            png_texture_inventory_count += 1
+        if RESOURCE_MODEL_JSON_RE.search(entry.path.lower()):
+            model_json_inventory_count += 1
         visual_kind = visual_text_asset_kind(entry.path)
         if visual_kind:
             visual_counts[visual_kind] += 1
@@ -2632,6 +2809,7 @@ def scan_source(args: argparse.Namespace) -> int:
         except Exception as exc:
             warnings.append(f"{entry.path}: {exc}")
 
+    identity_summary = canonicalize_identity_keys(units, namespace, map_slug)
     unit_path = out / "translation_units.jsonl"
     write_jsonl(unit_path, units)
     encoding_warnings: list[str] = [
@@ -2660,7 +2838,9 @@ def scan_source(args: argparse.Namespace) -> int:
         "total": sum(visual_counts.values()),
         "counts": dict(sorted(visual_counts.items())),
         "samples": visual_samples,
-        "note": "PNG textures, font providers, and model assets may contain visual text that requires separate image/font localization or manual QA.",
+        "png_texture_inventory_count": png_texture_inventory_count,
+        "model_json_inventory_count": model_json_inventory_count,
+        "note": "PNG/model candidates are path-filtered for likely text-bearing assets; inventory counts are not themselves text warnings. Confirm candidates with OCR or visual inspection.",
     }
     report = {
         "schema": "mc-map-java-scan-report.v2",
@@ -2685,6 +2865,7 @@ def scan_source(args: argparse.Namespace) -> int:
         "function_call_count": len(function_calls),
         "map_resource_packs": map_resource_packs,
         "map_resource_pack_count": len(map_resource_packs),
+        "identity_coupled": identity_summary,
         "direct_only_unit_count": sum(
             1
             for row in units
@@ -2967,21 +3148,29 @@ def audit_binary_entry(
     try:
         if lowered.endswith(".dat"):
             items = scan_nbt_strings(decompress_dat_payload(entry.data))
-            for item in items:
-                if nbt_path_is_last_output(item.path) and not include_last_output:
-                    continue
-                if nbt_path_is_audit_candidate(item.path):
-                    audit_nbt_string(item, source_file=entry.path, findings=findings, max_findings=max_findings)
+            rows = scan_nbt_items(
+                items,
+                source_file=entry.path,
+                namespace="audit",
+                map_slug="audit",
+                include_last_output=include_last_output,
+                counters=Counter(),
+            )
+            audit_add_rows(rows, findings=findings, max_findings=max_findings)
         elif lowered.endswith(".mca"):
             blobs, region_errors = iter_region_nbt(entry)
             errors.extend(region_errors)
             for chunk, nbt_data in blobs:
                 try:
-                    for item in scan_nbt_strings(nbt_data, chunk=chunk):
-                        if nbt_path_is_last_output(item.path) and not include_last_output:
-                            continue
-                        if nbt_path_is_audit_candidate(item.path):
-                            audit_nbt_string(item, source_file=entry.path, findings=findings, max_findings=max_findings)
+                    rows = scan_nbt_items(
+                        scan_nbt_strings(nbt_data, chunk=chunk),
+                        source_file=entry.path,
+                        namespace="audit",
+                        map_slug="audit",
+                        include_last_output=include_last_output,
+                        counters=Counter(),
+                    )
+                    audit_add_rows(rows, findings=findings, max_findings=max_findings)
                 except Exception as exc:
                     errors.append(f"{entry.path}: chunk {chunk.get('local_index')}: {exc}")
     except Exception as exc:
@@ -2996,12 +3185,16 @@ def write_audit_markdown(path: Path, report: dict[str, Any]) -> None:
         f"- Source: `{report['source']}`",
         f"- Scanned files: {report['scanned_files']}",
         f"- Findings: {report['finding_count']}",
+        f"- Candidate findings before limit: {report.get('candidate_finding_count', report['finding_count'])}",
+        f"- Skipped language files: {report.get('skipped_language_file_count', 0)}",
         f"- Warnings: {len(report.get('warnings', []))}",
         "",
     ]
     visual = report.get("visual_text_asset_hints", {})
-    if visual.get("total", 0):
+    if visual.get("total", 0) or visual.get("png_texture_inventory_count", 0) or visual.get("model_json_inventory_count", 0):
         lines.extend(["## Visual Asset Hints", ""])
+        lines.append(f"- PNG texture inventory (not all text candidates): {visual.get('png_texture_inventory_count', 0)}")
+        lines.append(f"- Model JSON inventory (not all text candidates): {visual.get('model_json_inventory_count', 0)}")
         for key, count in sorted(visual.get("counts", {}).items()):
             lines.append(f"- `{key}`: {count}")
         for sample in visual.get("samples", [])[:30]:
@@ -3020,19 +3213,53 @@ def write_audit_markdown(path: Path, report: dict[str, Any]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def audit_finding_priority(item: dict[str, Any]) -> tuple[int, str, str]:
+    source_kind = str(item.get("source_kind", ""))
+    priorities = {
+        "sign": 0,
+        "tellraw": 1,
+        "title": 1,
+        "actionbar": 1,
+        "bossbar": 1,
+        "command_block": 1,
+        "text_display": 1,
+        "book": 2,
+        "item_name": 2,
+        "item_lore": 2,
+        "entity_name": 2,
+        "storage_text": 3,
+        "function": 3,
+        "datapack_json": 3,
+        "lang": 8,
+    }
+    return priorities.get(source_kind, 5), str(item.get("source_file", "")), str(item.get("raw_preview", ""))
+
+
 def audit_english(args: argparse.Namespace) -> int:
     source = Path(args.source).resolve()
     out = Path(args.out).resolve()
+    if args.target_locale:
+        require_locale(args.target_locale, "--target-locale")
+    if args.source_locale:
+        require_locale(args.source_locale, "--source-locale")
     out.parent.mkdir(parents=True, exist_ok=True)
     findings: list[dict[str, Any]] = []
     warnings: list[str] = []
     scanned_files = 0
     visual_counts: Counter[str] = Counter()
     visual_samples: list[dict[str, str]] = []
+    png_texture_inventory_count = 0
+    model_json_inventory_count = 0
+    skipped_language_files: list[str] = []
+    collection_limit = max(args.max_findings * 20, args.max_findings, 1000)
 
     for entry in iter_entries(source):
         scanned_files += 1
         lowered = entry.path.lower()
+        if RESOURCE_PNG_RE.search(lowered):
+            png_texture_inventory_count += 1
+        if RESOURCE_MODEL_JSON_RE.search(lowered):
+            model_json_inventory_count += 1
         visual_kind = visual_text_asset_kind(entry.path)
         if visual_kind:
             visual_counts[visual_kind] += 1
@@ -3049,8 +3276,8 @@ def audit_english(args: argparse.Namespace) -> int:
                     suspicious_hints=suspicious_hints,
                     function_calls=[],
                 )
-                audit_add_rows(rows, findings=findings, max_findings=args.max_findings)
-                audit_add_suspicious_hints(suspicious_hints, findings=findings, max_findings=args.max_findings)
+                audit_add_rows(rows, findings=findings, max_findings=collection_limit)
+                audit_add_suspicious_hints(suspicious_hints, findings=findings, max_findings=collection_limit)
             elif lowered.endswith(".json") and entry.data is not None:
                 text = decode_text(entry.data, entry.path)
                 if text is None:
@@ -3061,10 +3288,18 @@ def audit_english(args: argparse.Namespace) -> int:
                     continue
                 is_lang = bool(LANG_PATH_RE.match(entry.path))
                 if is_lang:
+                    match = LANG_PATH_RE.match(entry.path)
+                    locale = match.group(2) if match else ""
+                    include_lang = bool(args.target_locale and locale == args.target_locale)
+                    if locale == args.source_locale and not args.include_source_language:
+                        include_lang = False
+                    if not include_lang:
+                        skipped_language_files.append(entry.path)
+                        continue
                     for json_path, value in iter_json_strings(obj):
                         audit_add(
                             findings,
-                            max_findings=args.max_findings,
+                            max_findings=collection_limit,
                             source_file=entry.path,
                             location={"json_path": json_path},
                             source_kind="lang",
@@ -3074,34 +3309,46 @@ def audit_english(args: argparse.Namespace) -> int:
                 else:
                     suspicious_hints = []
                     rows = scan_json_file(entry, "audit", "audit", suspicious_hints=suspicious_hints)
-                    audit_add_rows(rows, findings=findings, max_findings=args.max_findings, default_confidence="medium")
-                    audit_add_suspicious_hints(suspicious_hints, findings=findings, max_findings=args.max_findings)
+                    audit_add_rows(rows, findings=findings, max_findings=collection_limit, default_confidence="medium")
+                    audit_add_suspicious_hints(suspicious_hints, findings=findings, max_findings=collection_limit)
             elif is_binary_world_data(entry.path):
                 warnings.extend(
                     audit_binary_entry(
                         entry,
                         findings=findings,
-                        max_findings=args.max_findings,
+                        max_findings=collection_limit,
                         include_last_output=args.include_last_output,
                     )
                 )
         except Exception as exc:
             warnings.append(f"{entry.path}: {exc}")
 
+    candidate_finding_count = len(findings)
+    findings.sort(key=audit_finding_priority)
+    findings = findings[: args.max_findings]
     report = {
         "schema": "mc-map-residual-english-audit.v1",
         "created_at": utc_now(),
         "source": str(source),
         "scanned_files": scanned_files,
         "finding_count": len(findings),
+        "candidate_finding_count": candidate_finding_count,
         "max_findings": args.max_findings,
         "include_last_output": bool(args.include_last_output),
+        "target_locale": args.target_locale,
+        "source_locale": args.source_locale,
+        "include_source_language": bool(args.include_source_language),
+        "skipped_language_file_count": len(skipped_language_files),
+        "skipped_language_files": skipped_language_files[:200],
         "findings": findings,
         "warnings": warnings,
         "visual_text_asset_hints": {
             "total": sum(visual_counts.values()),
             "counts": dict(sorted(visual_counts.items())),
             "samples": visual_samples,
+            "png_texture_inventory_count": png_texture_inventory_count,
+            "model_json_inventory_count": model_json_inventory_count,
+            "note": "PNG/model candidates are path-filtered; verify them with OCR or visual inspection instead of treating every asset as text-bearing.",
         },
     }
     write_json(out, report)
@@ -3119,13 +3366,18 @@ class ApplyState:
         self.multi_text_mode = multi_text_mode
         self.changed_units = 0
         self.already_applied = 0
+        self.no_op_units = 0
         self.skipped: Counter[str] = Counter()
         self.skipped_samples: list[dict[str, str]] = []
         self.status_by_id: dict[str, str] = {}
         self.changed_files: set[str] = set()
+        self.outcomes_by_type: dict[str, Counter[str]] = defaultdict(Counter)
 
     def row_id(self, row: dict[str, Any]) -> str:
         return str(row.get("id") or id(row))
+
+    def row_type(self, row: dict[str, Any]) -> str:
+        return apply_unit_type(row)
 
     def mark_changed(self, row: dict[str, Any], source_file: str) -> None:
         row_id = self.row_id(row)
@@ -3134,6 +3386,7 @@ class ApplyState:
         self.status_by_id[row_id] = "changed"
         self.changed_units += 1
         self.changed_files.add(source_file)
+        self.outcomes_by_type[self.row_type(row)]["changed"] += 1
 
     def mark_already(self, row: dict[str, Any]) -> None:
         row_id = self.row_id(row)
@@ -3141,6 +3394,15 @@ class ApplyState:
             return
         self.status_by_id[row_id] = "already_applied"
         self.already_applied += 1
+        self.outcomes_by_type[self.row_type(row)]["already"] += 1
+
+    def mark_noop(self, row: dict[str, Any]) -> None:
+        row_id = self.row_id(row)
+        if row_id in self.status_by_id:
+            return
+        self.status_by_id[row_id] = "no_op"
+        self.no_op_units += 1
+        self.outcomes_by_type[self.row_type(row)]["no_op"] += 1
 
     def mark_skip(self, row: dict[str, Any], reason: str, detail: str = "") -> None:
         row_id = self.row_id(row)
@@ -3148,6 +3410,7 @@ class ApplyState:
             return
         self.status_by_id[row_id] = f"skipped:{reason}"
         self.skipped[reason] += 1
+        self.outcomes_by_type[self.row_type(row)]["skipped"] += 1
         if len(self.skipped_samples) < 100:
             self.skipped_samples.append(
                 {
@@ -3158,6 +3421,26 @@ class ApplyState:
                 }
             )
 
+    def type_report(self, selected_rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+        selected = Counter(apply_unit_type(row) for row in selected_rows)
+        result: dict[str, dict[str, int]] = {}
+        for unit_type in sorted(set(selected) | set(self.outcomes_by_type)):
+            outcomes = self.outcomes_by_type.get(unit_type, Counter())
+            result[unit_type] = {
+                "selected": selected[unit_type],
+                "changed": outcomes["changed"],
+                "no_op": outcomes["no_op"],
+                "already": outcomes["already"],
+                "skipped": outcomes["skipped"],
+            }
+        return result
+
+
+def apply_unit_type(row: dict[str, Any]) -> str:
+    if is_sign_group_row(row):
+        return "sign_face"
+    return str(row.get("source_kind", "unknown")) or "unknown"
+
 
 def confidence_allows(row: dict[str, Any], min_confidence: str) -> bool:
     value = str(row.get("confidence", "low"))
@@ -3165,10 +3448,7 @@ def confidence_allows(row: dict[str, Any], min_confidence: str) -> bool:
 
 
 def row_has_translation(row: dict[str, Any]) -> bool:
-    if str(row.get("translation", "")).strip():
-        return True
-    segments = row_segments(row)
-    return bool(segments) and all(str(segment.get("translation", "")).strip() for segment in segments)
+    return row_translation_complete(row)
 
 
 def select_hybrid_rows(rows: list[dict[str, Any]], args: argparse.Namespace) -> tuple[list[dict[str, Any]], Counter[str]]:
@@ -3298,6 +3578,10 @@ def select_direct_text_rows(rows: list[dict[str, Any]], args: argparse.Namespace
         if not translation.strip() and not args.allow_empty_translation:
             skipped["missing_translation"] += 1
             continue
+        if translation == str(row.get("raw", "")):
+            if not translation_item_complete(row):
+                skipped["unreviewed_same_as_source"] += 1
+                continue
         protected = row.get("protected", [])
         if not isinstance(protected, list):
             protected = []
@@ -3733,7 +4017,7 @@ def patch_direct_json_file(path: Path, source_file: str, rows: list[dict[str, An
         raw = str(row.get("raw", ""))
         translation = str(row.get("translation", ""))
         if current == translation:
-            state.mark_already(row)
+            mark_direct_current_translation(row, state)
             continue
         if current != raw:
             state.mark_skip(row, "source_text_mismatch", f"expected {raw[:120]!r}, found {current[:120]!r}")
@@ -3855,6 +4139,13 @@ def mark_direct_rows_skipped(rows: list[dict[str, Any]], state: ApplyState, reas
 
 def mark_direct_rows_already(rows: list[dict[str, Any]], state: ApplyState) -> None:
     for row in rows:
+        mark_direct_current_translation(row, state)
+
+
+def mark_direct_current_translation(row: dict[str, Any], state: ApplyState) -> None:
+    if str(row.get("raw", "")) == str(row.get("translation", "")):
+        state.mark_noop(row)
+    else:
         state.mark_already(row)
 
 
@@ -3879,7 +4170,7 @@ def patch_direct_plain_span(
     translation = str(row.get("translation", ""))
     current = value[start:end]
     if current == translation:
-        state.mark_already(row)
+        mark_direct_current_translation(row, state)
         return value, False
     if current != raw:
         state.mark_skip(row, "source_text_mismatch", f"expected {raw[:120]!r}, found {current[:120]!r}")
@@ -3942,7 +4233,7 @@ def patch_direct_command_json_span_rows(
 
     if not operations:
         for row in already:
-            state.mark_already(row)
+            mark_direct_current_translation(row, state)
         return value, False
 
     for json_path, translation, _row in operations:
@@ -3959,7 +4250,7 @@ def patch_direct_command_json_span_rows(
             state.mark_skip(row, "translation_too_long_for_nbt_string")
         return value, False
     for row in already:
-        state.mark_already(row)
+        mark_direct_current_translation(row, state)
     for _json_path, _translation, row in operations:
         state.mark_changed(row, str(row.get("source_file", "")))
     return candidate, True
@@ -4078,7 +4369,7 @@ def patch_direct_command_string_span(
     raw = str(row.get("raw", ""))
     translation = str(row.get("translation", ""))
     if decoded == translation:
-        state.mark_already(row)
+        mark_direct_current_translation(row, state)
         return value, False
     if decoded != raw:
         state.mark_skip(row, "source_text_mismatch", f"expected {raw[:120]!r}, found {str(decoded)[:120]!r}")
@@ -4496,6 +4787,14 @@ def world_file_path(root: Path, source_file: str) -> Path | None:
     return root.joinpath(*rel.parts)
 
 
+def source_resource_pack_paths(source: Path) -> list[str]:
+    return [
+        name
+        for name in entry_names(source)
+        if PurePosixPath(name).name.lower() == "resources.zip"
+    ]
+
+
 def patch_world_copy(root: Path, rows: list[dict[str, Any]], state: ApplyState) -> None:
     rows_by_file: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -4559,6 +4858,15 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
     out = Path(args.out).resolve()
     translations = Path(args.translations).resolve()
     is_zip_output = out.suffix.lower() == ".zip"
+    existing_map_resource_packs = source_resource_pack_paths(source)
+
+    if existing_map_resource_packs and not args.resource_pack and not args.allow_separate_resource_pack:
+        sample = ", ".join(existing_map_resource_packs[:5])
+        raise ValueError(
+            "source map already contains resources.zip; hybrid-keyed output must embed and merge the generated "
+            f"resource pack with --resource-pack (found: {sample}). Pass --allow-separate-resource-pack only when "
+            "the translated resource pack will be delivered and loaded separately."
+        )
 
     if source.is_dir():
         if out == source or is_relative_to(out, source):
@@ -4634,7 +4942,9 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
         "selected_units": len(rows),
         "selection_skipped": dict(sorted(selection_skipped.items())),
         "changed_units": state.changed_units,
+        "no_op_units": state.no_op_units,
         "already_applied_units": state.already_applied,
+        "by_type": state.type_report(rows),
         "changed_files": sorted(state.changed_files),
         "changed_file_count": len(state.changed_files),
         "skipped": dict(sorted(state.skipped.items())),
@@ -4642,6 +4952,8 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
         "resource_pack_embedded": bool(args.resource_pack and not args.dry_run),
         "resource_pack_embed_path": resource_pack_embed_path,
         "resource_pack_merge": resource_pack_merge_report,
+        "source_map_resource_packs": existing_map_resource_packs,
+        "separate_resource_pack_explicit": bool(args.allow_separate_resource_pack),
     }
     write_json(report_path, report)
 
@@ -4717,7 +5029,9 @@ def apply_direct_nbt_strings(args: argparse.Namespace) -> int:
         "selected_units": len(rows),
         "selection_skipped": dict(sorted(selection_skipped.items())),
         "changed_units": state.changed_units,
+        "no_op_units": state.no_op_units,
         "already_applied_units": state.already_applied,
+        "by_type": state.type_report(rows),
         "changed_files": sorted(state.changed_files),
         "changed_file_count": len(state.changed_files),
         "skipped": dict(sorted(state.skipped.items())),
@@ -4796,12 +5110,119 @@ def embed_resource_pack(args: argparse.Namespace) -> int:
         base_zip=target if target.exists() else None,
         replace_existing_resource_pack=args.replace_existing_resource_pack,
     )
+    embed_report = {
+        "schema": "mc-map-resource-pack-embed-report.v1",
+        "created_at": utc_now(),
+        "source": str(world),
+        "output": str(out),
+        "resource_pack": str(pack),
+        "resource_pack_embed_path": target.relative_to(out).as_posix(),
+        "source_map_resource_packs": source_resource_pack_paths(world),
+        "resource_pack_merge": merge_report,
+    }
+    report_path = out / "mcmap_resource_pack_embed_report.json"
+    write_json(report_path, embed_report)
     print(f"copied_world: {out}")
     print(f"embedded_resource_pack: {target}")
+    print(f"embed_report: {report_path}")
     print(f"resource_pack_zip_mode: {merge_report['mode']}")
     if merge_report.get("base_resource_pack"):
         print(f"base_resource_pack: {merge_report['base_resource_pack']}")
         print(f"overwritten_entries: {merge_report['overwritten_entry_count']}")
+    return 0
+
+
+def read_json_object(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(value, dict):
+        raise ValueError(f"expected JSON object: {path}")
+    return value
+
+
+def write_delivery(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    primary = Path(args.primary_output).resolve()
+    translation_qa_path = Path(args.translation_qa).resolve()
+    resource_pack = Path(args.resource_pack_output).resolve() if args.resource_pack_output else None
+    residual_audit = Path(args.residual_audit).resolve() if args.residual_audit else None
+    apply_reports = [Path(item).resolve() for item in args.apply_report]
+    required_paths = [project, primary, translation_qa_path, *apply_reports]
+    if resource_pack:
+        required_paths.append(resource_pack)
+    if residual_audit:
+        required_paths.append(residual_audit)
+    missing = [str(path) for path in required_paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"delivery inputs do not exist: {', '.join(missing)}")
+
+    translation_qa = read_json_object(translation_qa_path)
+    if translation_qa.get("status") != "pass":
+        raise ValueError(f"translation QA is not passing: {translation_qa_path}")
+    if translation_qa.get("allow_incomplete") or int(translation_qa.get("remaining_units", 0) or 0):
+        raise ValueError(f"delivery requires complete translation QA without --allow-incomplete: {translation_qa_path}")
+    scan_report_path = project / "scan_report.json"
+    scan_report = read_json_object(scan_report_path) if scan_report_path.exists() else {}
+    report_objects = [read_json_object(path) for path in apply_reports]
+    existing_pack_count = int(scan_report.get("map_resource_pack_count", 0) or 0)
+    merge_proven = any(
+        isinstance(report.get("resource_pack_merge"), dict)
+        and report["resource_pack_merge"].get("mode") == "merge"
+        for report in report_objects
+    )
+    if existing_pack_count and args.mode in {"embedded-pack-copy", "hybrid-keyed-copy", "direct-text-copy"} and not merge_proven:
+        raise ValueError(
+            "source map had resources.zip, but no supplied apply/embed report proves that the generated pack was merged"
+        )
+    if args.mode == "resource-pack-only" and resource_pack is None:
+        raise ValueError("resource-pack-only delivery requires --resource-pack-output")
+    if args.mode in {"hybrid-keyed-copy", "direct-text-copy"} and not apply_reports:
+        raise ValueError(f"{args.mode} delivery requires at least one --apply-report")
+
+    residual_report = read_json_object(residual_audit) if residual_audit else {}
+    out = Path(args.out).resolve() if args.out else project / "exports" / "DELIVERY.md"
+    lines = [
+        "# Delivery",
+        "",
+        f"- Export mode: `{args.mode}`",
+        f"- Primary output: `{primary}`",
+        f"- Translation QA: `{translation_qa_path}` (`pass`)",
+        f"- Source map resource packs: {existing_pack_count}",
+        f"- Existing resource-pack merge proven: {'yes' if merge_proven else 'not required'}",
+    ]
+    if resource_pack:
+        lines.append(f"- Resource-pack output: `{resource_pack}`")
+    if residual_audit:
+        lines.append(
+            f"- Residual-English audit: `{residual_audit}` ({residual_report.get('finding_count', 0)} reported findings)"
+        )
+    for path in apply_reports:
+        lines.append(f"- Apply/embed report: `{path}`")
+    if args.notes:
+        lines.extend(["", "## Notes", "", args.notes.strip()])
+    lines.extend(
+        [
+            "",
+            "Use the primary output above as the canonical delivery artifact. Other zips in the exports folder are intermediate or alternate-mode artifacts unless listed here.",
+            "",
+        ]
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(lines), encoding="utf-8")
+    report = {
+        "schema": "mc-map-delivery.v1",
+        "created_at": utc_now(),
+        "mode": args.mode,
+        "primary_output": str(primary),
+        "resource_pack_output": str(resource_pack) if resource_pack else "",
+        "translation_qa": str(translation_qa_path),
+        "residual_audit": str(residual_audit) if residual_audit else "",
+        "apply_reports": [str(path) for path in apply_reports],
+        "source_map_resource_pack_count": existing_pack_count,
+        "resource_pack_merge_proven": merge_proven,
+    }
+    write_json(out.with_suffix(".json"), report)
+    print(f"delivery: {out}")
+    print(f"primary_output: {primary}")
     return 0
 
 
@@ -4835,6 +5256,11 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--out", required=True, help="copied world output directory or .zip")
     apply.add_argument("--resource-pack", default="", help="optional resource-pack directory to embed as resources.zip in the copied world")
     apply.add_argument(
+        "--allow-separate-resource-pack",
+        action="store_true",
+        help="allow a source map with resources.zip to ship generated hybrid language keys as a separate manually loaded pack",
+    )
+    apply.add_argument(
         "--multi-text-mode",
         choices=["split-nodes", "skip"],
         default="split-nodes",
@@ -4843,7 +5269,18 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--min-confidence", choices=["low", "medium", "high"], default="medium", help="minimum scanner confidence to apply")
     apply.add_argument("--source-kind", default="", help="comma-separated source_kind filter")
     apply.add_argument("--unit-id", default="", help="comma-separated unit id filter")
-    apply.add_argument("--translated-only", action="store_true", help="only inject keys for units with a non-empty translation")
+    apply.add_argument(
+        "--translated-only",
+        dest="translated_only",
+        action="store_true",
+        help="only inject keys for fully translated/reviewed units (default)",
+    )
+    apply.add_argument(
+        "--include-untranslated",
+        dest="translated_only",
+        action="store_false",
+        help="unsafe diagnostic mode: allow key injection for units without complete translations",
+    )
     apply.add_argument("--dry-run", action="store_true", help="copy to a temporary directory and report what would change")
     apply.add_argument("--report", default="", help="custom apply report JSON path")
     apply.add_argument("--allow-no-changes", action="store_true", help="return success even when no units changed")
@@ -4853,7 +5290,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="when embedding --resource-pack, replace an existing copied resources.zip instead of merging the generated pack into it",
     )
-    apply.set_defaults(func=apply_hybrid_keys)
+    apply.set_defaults(func=apply_hybrid_keys, translated_only=True)
 
     direct = subparsers.add_parser(
         "apply-direct-nbt-strings",
@@ -4890,6 +5327,13 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("source", help="Java world directory or map zip to audit")
     audit.add_argument("--out", required=True, help="output residual English audit JSON report")
     audit.add_argument("--max-findings", type=int, default=500, help="maximum findings to record")
+    audit.add_argument("--target-locale", default="", help="audit only this target locale language JSON, for example zh_cn")
+    audit.add_argument("--source-locale", default="en_us", help="source locale language JSON to exclude by default")
+    audit.add_argument(
+        "--include-source-language",
+        action="store_true",
+        help="include source-locale language JSON in residual-English findings",
+    )
     audit.add_argument("--include-last-output", action="store_true", help="include command block LastOutput logs in the audit")
     audit.set_defaults(func=audit_english)
 
@@ -4910,6 +5354,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="replace an existing copied resources.zip instead of merging the generated pack into it",
     )
     embed.set_defaults(func=embed_resource_pack)
+
+    delivery = subparsers.add_parser("write-delivery", help="write one canonical DELIVERY.md after QA and apply checks")
+    delivery.add_argument("project", help="localization project/work directory containing scan_report.json")
+    delivery.add_argument(
+        "--mode",
+        required=True,
+        choices=["resource-pack-only", "embedded-pack-copy", "hybrid-keyed-copy", "direct-text-copy"],
+        help="exact user-facing export mode",
+    )
+    delivery.add_argument("--primary-output", required=True, help="canonical map or resource-pack artifact to deliver")
+    delivery.add_argument("--resource-pack-output", default="", help="optional standalone or merged resource-pack artifact")
+    delivery.add_argument("--translation-qa", required=True, help="passing qa-translations JSON report")
+    delivery.add_argument("--residual-audit", default="", help="optional residual-English audit JSON report")
+    delivery.add_argument("--apply-report", action="append", default=[], help="apply/embed report; repeat for chained hybrid/direct exports")
+    delivery.add_argument("--notes", default="", help="short delivery notes")
+    delivery.add_argument("--out", default="", help="output DELIVERY.md; defaults to <project>/exports/DELIVERY.md")
+    delivery.set_defaults(func=write_delivery)
 
     return parser
 

@@ -35,6 +35,7 @@ If a term appears in lore and gameplay instructions, choose one translation that
 - Translate every player-facing unit in the current workpack that can be safely translated with available context.
 - Do not skip difficult jokes, lore, signs, bossbars, books, or puzzle text merely because they require adaptation. Translate them carefully, or flag a concrete blocker and proposed rewrite.
 - Preserve deliberate untranslated names, IDs, brand-like terms, or stylistic source-language fragments only when they are intentional, and note that choice when it could be mistaken for missed coverage.
+- When `translation` deliberately equals `raw`, set `review_status` to `intentional_name`, `code`, `ascii_art`, or `puzzle_token` and write a concrete `review_reason`. Leaving the copied source in `translation` without this evidence is not completion.
 - For low-confidence or risky units, prefer a cautious contextual translation plus a QA note over silent omission, unless applying it could break commands or puzzle mechanics.
 
 ## Minecraft-Specific Rules
@@ -46,6 +47,7 @@ If a term appears in lore and gameplay instructions, choose one translation that
 - Preserve escape shape. A JSONL file may show a real newline as `\n` because JSON serializes it that way; keep it as a real newline in the decoded value. If the decoded source text contains literal backslash+n (`\\n`), keep those two characters unless the command/JSON/SNBT layer is being deliberately rewritten.
 - Treat backslash escapes such as `\n`, `\t`, `\"`, `\\`, and `\uXXXX` as protected syntax until proven to be ordinary prose. Do not double-escape them and do not let a spreadsheet, shell, or model rewrite turn them into another layer.
 - Preserve JSON text component styling and events.
+- For `context.identity_coupled`, use one translation across the identity group and preserve its canonical unit/segment keys. A currency, quest key, named reward, or trade item may be compared by its full component structure; equal visible wording with different generated keys can break gameplay.
 
 ## Multilingual Encoding
 
@@ -64,6 +66,7 @@ Some JSON text components split one visible message across several `text` nodes 
 - Fill `segments[].translation` from the full-message translation, not from isolated word-by-word translation.
 - Preserve the original component order because `split-nodes` keeps selectors, scores, and styled fragments in place.
 - If the target language cannot read naturally in the original segment order, leave the difficult segment translations empty and note that the unit needs a future compose/direct rewrite instead of forcing bad phrasing.
+- If one segment deliberately stays unchanged (for example `TNT`, a name, code, or divider), classify and explain that segment independently even when the whole message is translated.
 
 ## Creative Text
 

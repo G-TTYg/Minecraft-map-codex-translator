@@ -40,6 +40,8 @@ For each translation batch:
 8. Write translations only to the matching `translations/parts/workpack_###.jsonl`.
 9. Refresh `translation_progress.md` after each batch.
 
+When a workpack contains `context.identity_coupled`, load all rows in that identity group from the indexes before deciding terminology. Use one translation and keep scanner-provided canonical keys across producers, containers, villager offers, and consumers.
+
 Do not load every file under `units/`, `workpacks/`, and `translations/parts/` at the same time.
 Do not send the workpack to an external translation service by default; translate it with Codex using the loaded context.
 
@@ -61,7 +63,7 @@ Refresh the TODO:
 - after `merge-translations`;
 - before final export/QA.
 
-Do not mark a workpack complete until every unit has `translation` filled and every required `segments[].translation` slot is filled.
+Do not mark a workpack complete until every unit has `translation` filled and every required `segments[].translation` slot is filled. Source-equal unit or segment translations remain incomplete until they carry an approved `review_status` and concrete `review_reason`.
 
 ## Segment-Aware Translation
 
@@ -82,6 +84,7 @@ After one or more parts are translated:
 python skills/mc-map-translate/scripts/mcmap_contract.py merge-translations work/map/translations/parts --base work/map/translation_units.jsonl --out work/map/translations/translations.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py validate-units work/map/translations/translations.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py translation-status work/map/translation_units.jsonl --translations work/map/translations/translations.jsonl --incomplete-only
+python skills/mc-map-translate/scripts/mcmap_contract.py qa-translations work/map --out work/map/qa/translation_qa.json
 ```
 
 Export commands accept a merged JSONL, a translation parts directory, or the project root. The project root prefers `translations/translations.jsonl` if it exists, then `translations/parts/*.jsonl`, then `translation_units.jsonl`.

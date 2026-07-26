@@ -57,6 +57,8 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - Never treat regex over `.mca` bytes as authoritative; use a parser or mark results as low confidence.
    - Treat scanner coverage as a first-class QA surface. Review `scan_review.md`, `scan_report.json`, excluded `LastOutput` counts, aggregated sign groups, visual asset hints, and pending parser coverage before declaring translation coverage.
    - Treat modern datapacks as a priority source. Expect text in `.mcfunction`, `execute ... run ...` chains, macro function lines, storage JSON/SNBT, loot tables, item modifiers, advancements, predicates, and custom JSON under `datapacks/*/data/**`.
+   - Require sign/hanging-sign text to be represented as one `sign` face unit, even when only one of four lines contains text. Verify `sign_faces_seen`, `aggregated_sign_groups`, four-line context, face direction, exact line anchors, and `block_pos` where available; isolated sign-line units are a scanner defect unless parsing failed and was reported.
+   - Treat item `custom_name`, `item_name`, and `lore` as potentially `identity_coupled`. Review `identity_coupled` groups before translation: offers, containers, rewards, `give`/`loot`/`item replace`, `clear`, and `execute if items` must retain equivalent text-component structure and canonical keys when they refer to the same identity text.
    - Use scanner-reported `function_call_graph` and `suspicious_text_hints` to recover dialogue order and review likely player-facing storage/macro/custom JSON strings that were not safely promoted to normal apply units.
    - After the first scan, summarize coverage by export mode and ask which of the four modes to produce. When `full_localization_recommendation.suggest_full_translation_mode` is true, recommend `hybrid-keyed-copy` as the safest complete mode for hardcoded JSON text, or ask whether to upgrade to `direct-text-copy` when direct-only text remains and the user wants maximum coverage.
    - If `scan_report.json` lists `map_resource_packs`, preserve those packs as the base layer for embedded outputs and mention that a standalone translation pack may be only an overlay unless merged with the original map pack.
@@ -68,6 +70,7 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - Create or update `glossary.md` before translating substantial text.
    - Maintain translation progress as a TODO list. Use the Codex task checklist for the active session when available, and keep the durable project TODO at `translation_progress.md` updated with `write-progress-todo`.
    - Translate in batches small enough to keep local context visible. Write staged translations to `translations/parts/workpack_###.jsonl` as UTF-8, then merge by stable `id`.
+   - Never count a non-empty translation as automatically reviewed. If `translation == raw`, set `review_status` to `intentional_name`, `code`, `ascii_art`, or `puzzle_token` and write a concrete `review_reason`; otherwise it remains `unreviewed_same_as_source` and the workpack is incomplete.
 
 4. Translate like a localization editor.
    - Translate with Codex reasoning over map context; do not call external translation APIs or paste batches into web translators.
@@ -79,19 +82,25 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - Preserve escape semantics exactly: do not change a real newline into literal `\\n`, and do not change literal `\\n` into a real newline unless the source layer is intentionally being rewritten and QA notes explain it.
    - For puzzles, riddles, rhymes, lore, and jokes, preserve player experience over word-for-word meaning.
    - For units with `segments[]`, translate `raw` as the complete message first, then fill each `segments[].translation` so the preserved Minecraft component order still reads naturally.
+   - Apply the same unchanged-text review rule to every segment. A translated sign face may legitimately retain `TNT`, a player name, or an ASCII divider on one line, but that line needs its own status/reason.
+   - Do not translate or independently re-key identity-coupled item occurrences. Use the scanner-provided canonical key and one group translation; conflicting keys or translations block delivery.
 
 5. Export safely.
    - `resource-pack-only`: generate language/resource files, zip the pack, and produce a QA report.
    - `embedded-pack-copy`: copy the world/map and embed the generated pack as `resources.zip` beside `level.dat`; if the copied world already has `resources.zip`, merge the generated pack into it.
    - `hybrid-keyed-copy`: first build a resource pack with `--include-hybrid-keys`, then run `apply-hybrid-keys` to patch a copied map so supported hardcoded JSON text components use generated `translate` keys. This is the default "full translation" core when hardcoded JSON text exists. If `--resource-pack` is embedded and the copied world already has `resources.zip`, merge instead of replacing.
+   - When the source map already contains `resources.zip`, pass `--resource-pack` for hybrid output so the generated language keys are merged into that pack. Use `--allow-separate-resource-pack` only for an explicitly documented manual two-pack delivery.
    - `direct-text-copy`: run `apply-direct-text` only after explicit user confirmation; patch only exact anchors in the copy, validate every changed file, and report each anchor changed. Use it for translated plain command, SNBT, datapack JSON, or NBT strings that are not JSON text components.
    - For "maximum coverage", chain `hybrid-keyed-copy` first and then `direct-text-copy` on that copied output when direct-only units remain and the user accepts the risk.
 
 6. QA before final delivery.
    - Run schema validation on JSONL units and translation files.
+   - Run `qa-translations` and require `status: pass` without `--allow-incomplete`. It blocks unreviewed source-equal text, incomplete sign faces, identity-key conflicts, encoding damage, and structural errors.
    - Validate JSON text components and language JSON.
    - Check placeholders, selectors, color codes, newline counts, key coverage, untranslated residues, duplicate key conflicts, multilingual encoding integrity, and command breakage risk.
    - Produce a short report with coverage by source kind and export mode.
+   - Run `audit-english --target-locale <locale>` so source-language lang files do not consume the finding limit. Review findings by sign face and player-facing source kind; classify intentional names/codes separately from missed sentences.
+   - Finish with `write-delivery` so `exports/DELIVERY.md` names exactly one canonical output, the exact one of four modes, QA report, residual audit, and apply/embed reports.
 
 ## Script Helpers
 
@@ -102,6 +111,7 @@ python skills/mc-map-translate/scripts/mcmap_contract.py init-workspace path/to/
 python skills/mc-map-translate/scripts/mcmap_contract.py validate-units work/mymap/translation_units.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py make-project-files work/mymap/translation_units.jsonl --out-dir work/mymap --max-units 120
 python skills/mc-map-translate/scripts/mcmap_contract.py translation-status work/mymap
+python skills/mc-map-translate/scripts/mcmap_contract.py qa-translations work/mymap --out work/mymap/qa/translation_qa.json
 python skills/mc-map-translate/scripts/mcmap_contract.py write-progress-todo work/mymap
 python skills/mc-map-translate/scripts/mcmap_contract.py make-workpacks work/mymap/translation_units.jsonl --out-dir work/mymap/workpacks --max-units 200
 python skills/mc-map-translate/scripts/mcmap_contract.py prepare-segments work/mymap/translation_units.jsonl --out work/mymap/translations.segmented.jsonl
@@ -126,10 +136,11 @@ python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys pat
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world --translations work/mymap --out work/mymap/exports/world-keyed --resource-pack work/mymap/exports/hybrid-resource-pack
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world.zip --translations work/mymap/translations/translations.jsonl --out work/mymap/exports/world-keyed.zip
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-direct-text path/to/world.zip --translations work/mymap --out work/mymap/exports/world-direct-text.zip --min-confidence low
-python skills/mc-map-translate/scripts/mcmap_java_tools.py audit-english path/to/exported-world-or.zip --out work/mymap/qa/residual_english_audit.json
+python skills/mc-map-translate/scripts/mcmap_java_tools.py audit-english path/to/exported-world-or.zip --out work/mymap/qa/residual_english_audit.json --target-locale ja_jp --source-locale en_us
 python skills/mc-map-translate/scripts/mcmap_java_tools.py zip-resource-pack work/mymap/exports/resource-pack --out work/mymap/exports/mymap-ja_jp-resourcepack.zip
 python skills/mc-map-translate/scripts/mcmap_java_tools.py zip-resource-pack work/mymap/exports/resource-pack --base-resource-pack path/to/existing/resources.zip --out work/mymap/exports/mymap-ja_jp-merged-resourcepack.zip
 python skills/mc-map-translate/scripts/mcmap_java_tools.py embed-resource-pack path/to/world --resource-pack work/mymap/exports/resource-pack --out work/mymap/exports/world-with-resources
+python skills/mc-map-translate/scripts/mcmap_java_tools.py write-delivery work/mymap --mode hybrid-keyed-copy --primary-output work/mymap/exports/world-keyed.zip --translation-qa work/mymap/qa/translation_qa.json --residual-audit work/mymap/qa/residual_english_audit.json --apply-report work/mymap/exports/world-keyed.zip.mcmap_hybrid_apply_report.json
 ```
 
 Use scanner output files directly: `translation_units.jsonl`, `scan_report.json`, `scan_review.md`, `glossary.md`, `translation_progress.md`, and the indexed project layout under `index/`, `context/`, `workpacks/contextual/`, and `translations/parts/`. If a parser is not yet available for a source kind, report missing parser coverage instead of pretending low-confidence extraction is reliable.
@@ -150,6 +161,9 @@ For staged AI translation, treat `index/manifest.json` as the entry point. Load 
 - Do not casually rewrite backslash escapes such as `\n`, `\t`, `\"`, `\\`, or `\uXXXX`; they may belong to JSON, SNBT, command syntax, or Minecraft rendering rather than prose.
 - Do not claim resource-pack-only coverage for hardcoded text unless the map already uses translation keys or the output mode includes key injection.
 - Do not replace a map's existing `resources.zip` with a translation-only pack unless the user explicitly asks for replacement; merge generated language files into the copied existing pack by default.
+- Do not generate hybrid keys per occurrence for item names/lore that may participate in NBT/component equality. Preserve scanner-generated identity groups and canonical keys, and block conflicting groups in QA.
+- Do not mark source-equal text as translated without an approved `review_status` and non-empty `review_reason`.
+- Do not deliver from an interim `qa-translations --allow-incomplete` report.
 - Do not translate a real map without maintaining `translation_progress.md` or an equivalent user-approved persistent progress TODO.
 - Do not apply or export translations that show mojibake, replacement characters, or `?` in place of target-language characters; re-read and repair the UTF-8 source artifact first.
 - Ask for explicit confirmation before `embedded-direct` output.

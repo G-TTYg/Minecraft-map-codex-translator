@@ -19,6 +19,7 @@ The bundled tools do not call external translation services and do not translate
 - `make-workpacks`: split units into stable JSONL translation batches.
 - `merge-translations`: merge translated JSONL files/directories back into one canonical translations JSONL by stable `id`.
 - `translation-status`: report coverage by unit, source kind, source file, and segment slots.
+- `qa-translations`: write blocking JSON/Markdown QA for incomplete units, unexplained source-equal text, sign-face segment coverage, encoding/contract errors, and identity-coupled key/translation conflicts. `--allow-incomplete` is interim-only.
 - `write-progress-todo`: write or refresh `translation_progress.md`, the persistent workpack TODO list.
 - `prepare-segments`: add `segments[]` translation slots for grouped components with multiple hardcoded `text` nodes.
 - `export-table`: export selected units to UTF-8 TSV.
@@ -30,13 +31,14 @@ The bundled tools do not call external translation services and do not translate
 `scripts/mcmap_java_tools.py`:
 
 - `inspect`: detect Java map/package markers and Bedrock-only markers.
-- `scan`: scan Java resource-pack language JSON, all datapack JSON text components, datapack JSON strings containing text components, `.mcfunction` JSON text components, `execute ... run ...` command chains, command JSON plain strings, quoted command/SNBT JSON text components, plain command messages, storage value strings, aggregated sign faces, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Pass `--project-layout` to also create the indexed multi-file layout. `LastOutput` is excluded by default; pass `--include-last-output` only when intentionally auditing command logs. NBT strings are decoded as strict UTF-8; invalid bytes are reported instead of converted to replacement characters. `scan_report.json` includes function call graph context, suspicious text hints, visual text asset hints for PNG/font/model resources, and a `full_localization_recommendation` prompt.
-- `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy. Blocks selected rows that contain Unicode replacement characters. When `--resource-pack` is used, embeds `resources.zip` beside the copied world's `level.dat`, including packages whose zip root is a containing folder. If the copied world already has `resources.zip`, the generated pack is merged into it by default; pass `--replace-existing-resource-pack` only when the user explicitly wants replacement.
+- `scan`: scan Java resource-pack language JSON, all datapack JSON text components, datapack JSON strings containing text components, `.mcfunction` JSON text components, `execute ... run ...` command chains, command JSON plain strings, quoted command/SNBT JSON text components, plain command messages, storage value strings, whole sign faces, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Sign units retain four-line context and block coordinates when available. Item name/lore rows receive identity-group metadata and canonical keys. Pass `--project-layout` to also create the indexed multi-file layout. `LastOutput` is excluded by default. NBT strings are strict UTF-8. Reports include function-call context, suspicious strings, path-filtered visual text candidates, PNG inventory, and export recommendations.
+- `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy. It selects only complete/reviewed translations by default and reports outcomes by type. If the source already has `resources.zip`, omitting `--resource-pack` is blocked unless `--allow-separate-resource-pack` explicitly documents manual separate-pack delivery. Existing copied packs are merged by default; replacement remains explicit.
 - `apply-direct-text`: copy/extract a Java world or map zip and directly replace translated `embedded-direct` anchors in `.mcfunction`, datapack JSON, `.dat`, and `.mca` files when exact anchors match. It handles `command_plain_span`, plain `command_string_span`, `command_json_path`, datapack JSON `json_string_path`, and parsed NBT strings. Blocks selected rows that contain Unicode replacement characters.
 - `apply-direct-nbt-strings`: legacy alias for `apply-direct-text`.
-- `audit-english`: rescan an exported copied world or map zip for English-looking residual text in player-facing-ish `.mcfunction`, datapack JSON, command, sign, text, CustomName, display/lore, and book/page paths. It writes JSON plus a Markdown review and reports visual asset hints; it skips pure `translate` keys and protected tokens by default.
+- `audit-english`: rescan an exported copied world or map zip for English-looking residual text in player-facing `.mcfunction`, datapack JSON, commands, whole sign faces, text displays, names/lore, and books. Pass `--target-locale`; unrelated/source lang files are excluded by default. High-priority world text is sorted ahead of lang rows, and PNG warnings are path-filtered candidates.
 - `zip-resource-pack`: zip a resource pack directory with the correct root. Pass `--base-resource-pack <resources.zip>` to create a merged full pack from an existing map pack plus generated language files.
 - `embed-resource-pack`: copy a Java world and add or merge `resources.zip` in the copy. Existing copied `resources.zip` is preserved as the base pack unless `--replace-existing-resource-pack` is passed.
+- `write-delivery`: require complete passing translation QA and existing-pack merge evidence, then write one canonical `exports/DELIVERY.md` plus JSON manifest naming the exact mode and primary artifact.
 
 ## Recommended Order
 
@@ -46,6 +48,7 @@ python skills/mc-map-translate/scripts/mcmap_java_tools.py scan <world-or-zip> -
 python skills/mc-map-translate/scripts/mcmap_contract.py validate-units <workdir>/translation_units.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py summarize-units <workdir>/translation_units.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py translation-status <workdir>
+python skills/mc-map-translate/scripts/mcmap_contract.py qa-translations <workdir> --out <workdir>/qa/interim_translation_qa.json --allow-incomplete
 python skills/mc-map-translate/scripts/mcmap_contract.py write-progress-todo <workdir>
 ```
 
@@ -91,6 +94,7 @@ After Codex fills one or more translation parts:
 python skills/mc-map-translate/scripts/mcmap_contract.py merge-translations <workdir>/translations/parts --base <workdir>/translation_units.jsonl --out <workdir>/translations/translations.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py validate-units <workdir>/translations/translations.jsonl
 python skills/mc-map-translate/scripts/mcmap_contract.py translation-status <workdir>/translation_units.jsonl --translations <workdir>/translations/translations.jsonl --incomplete-only
+python skills/mc-map-translate/scripts/mcmap_contract.py qa-translations <workdir> --out <workdir>/qa/translation_qa.json
 python skills/mc-map-translate/scripts/mcmap_contract.py write-progress-todo <workdir>
 ```
 
@@ -116,7 +120,8 @@ Then patch a copied world or copied map zip. Include `--resource-pack` when you 
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys <world-or-zip> --translations <workdir> --out <workdir>/exports/world-keyed --resource-pack <workdir>/exports/hybrid-resource-pack
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys <world-or-zip> --translations <workdir> --out <workdir>/exports/world-keyed.zip
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-direct-text <workdir>/exports/world-keyed.zip --translations <workdir> --out <workdir>/exports/world-full-direct.zip --min-confidence low
-python skills/mc-map-translate/scripts/mcmap_java_tools.py audit-english <workdir>/exports/world-full-direct.zip --out <workdir>/qa/residual_english_audit.json
+python skills/mc-map-translate/scripts/mcmap_java_tools.py audit-english <workdir>/exports/world-full-direct.zip --out <workdir>/qa/residual_english_audit.json --target-locale <target_locale> --source-locale en_us
+python skills/mc-map-translate/scripts/mcmap_java_tools.py write-delivery <workdir> --mode direct-text-copy --primary-output <workdir>/exports/world-full-direct.zip --resource-pack-output <workdir>/exports/merged-resource-pack.zip --translation-qa <workdir>/qa/translation_qa.json --residual-audit <workdir>/qa/residual_english_audit.json --apply-report <workdir>/exports/world-keyed.zip.mcmap_hybrid_apply_report.json --apply-report <workdir>/exports/world-full-direct.zip.mcmap_direct_text_apply_report.json
 ```
 
 For `direct-text-copy` translated text that cannot be key-injected:
@@ -157,6 +162,8 @@ Safety limits:
 - Every target `text` value must still exactly equal the recorded source segment; otherwise the unit is skipped.
 - Existing `translate` conflicts, missing paths, unsafe paths, nested `resources.zip!` paths, and missing/invalid segment keys are skipped and reported.
 - Plain NBT strings without JSON text component context are not hybrid-key-injection targets; they require explicit `embedded-direct` handling.
+- Identity-coupled item text keeps scanner-generated canonical keys shared across equivalent visible text shapes. Do not replace them with occurrence keys.
+- A source map with `resources.zip` requires merged embedding by default. `--allow-separate-resource-pack` is an explicit distribution exception.
 
 Use `--multi-text-mode skip` only when you want the old conservative behavior for audit or comparison.
 

@@ -18,6 +18,8 @@ Use this reference before apply or export.
 - After `apply-hybrid-keys`, inspect `mcmap_hybrid_apply_report.json` and rescan the copied world or copied zip when practical.
 - After `apply-direct-text` or legacy `apply-direct-nbt-strings`, inspect `mcmap_direct_text_apply_report.json` and rescan the copied world or copied zip when practical.
 - After export/apply, run `audit-english` on the copied world or copied zip when the target language is not English and the map has hardcoded text. Treat findings in `.mcfunction`, command `Command`, datapack JSON storage/dialogue paths, sign `messages`, `CustomName`, display/lore, and book/page paths as high-priority QA leads.
+- Pass `--target-locale` to `audit-english`. Source-language and unrelated locale lang files are excluded by default so they cannot exhaust the finding limit before hardcoded world text. Review sign findings as whole faces, not isolated lines.
+- Run `qa-translations` before export and require `status: pass` with `remaining_units: 0` and `allow_incomplete: false`. `--allow-incomplete` is for interim review only and cannot authorize delivery.
 
 ## Translation QA
 
@@ -27,11 +29,14 @@ Use this reference before apply or export.
 - Backslash escapes such as `\n`, `\t`, `\"`, `\\`, and `\uXXXX` are preserved at the correct layer. If changed, the QA report explains which source layer was intentionally rewritten.
 - No accidental translation of internal IDs or command syntax.
 - No untranslated English remains except deliberate names, IDs, or stylistic choices.
+- Any source-equal translation has one approved status (`intentional_name`, `code`, `ascii_art`, or `puzzle_token`) and a concrete reason. A non-empty copied source string without that evidence is `unreviewed_same_as_source`, not translated.
 - Glossary terms are consistent.
 - Duplicate language keys have identical intended meaning or are split.
 - Grouped text components are translated as complete messages, not as isolated style fragments.
 - For `segments[]`, the full unit `translation` and each segment translation should agree semantically; segment translations should not read like unedited word-by-word fragments.
 - For aggregated sign units, the four-line `raw` is the translation source of truth. Segment translations should preserve readable sign layout in the target language, not mechanically translate each source line.
+- Every player-text sign face is aggregated, including one-line faces. Compare `sign_faces_seen`, `aggregated_sign_groups`, and `sign_faces_without_player_text`; unexplained isolated sign-line rows or a large aggregation gap is a scanner QA failure.
+- Identity-coupled groups have one canonical unit key and one key per segment slot, plus consistent translations. Any conflict blocks delivery.
 - Target-language scripts, accents, punctuation width, right-to-left text, emoji, and Minecraft section sign formatting survive scan, edit, merge, export, and apply without corruption.
 - Stiff literal phrasing, context-inconsistent terminology, untranslated player-facing residues, and unexplained skipped difficult text are treated as QA failures.
 
@@ -49,11 +54,14 @@ Report counts by:
 - Low-confidence anchors needing manual review.
 - Excluded `LastOutput` count and whether `--include-last-output` was intentionally used.
 - Aggregated sign groups and segment coverage.
+- Sign faces discovered, aggregated, without player text, complete, changed, no-op, already applied, and skipped.
+- Identity-coupled unit/group counts, repeated groups, role coverage, and key/translation conflicts.
 - Residual-English audit findings after export/apply.
 - Datapack function call graph coverage and suspicious text hints reviewed.
 - Player-facing units intentionally left untranslated, with concrete reasons.
 - Files reported as pending binary parser coverage.
 - Resource-pack visual text asset hints, especially PNG textures and font provider JSON that language JSON cannot cover.
+- PNG inventory versus path-filtered visual-text candidates. Do not present the full PNG inventory as confirmed untranslated text; record OCR/visual-review decisions for candidates.
 - Existing map `resources.zip` paths and whether the export preserved/merged them.
 - Top repeated raw strings and top source files from `scan_review.md`.
 - Any encoding or font-rendering risks found during table round-trip, resource-pack export, copied-world apply, or in-game review.
@@ -72,8 +80,21 @@ For any world patch, report:
 - Parser confidence.
 - Known unhandled source kinds.
 - Commands or text components that could not be safely transformed.
+- Apply counts by type (`sign_face`, `item_name`, `item_lore`, and other source kinds): selected, changed, no-op, already, and skipped.
 - `segment_count_mismatch`, `segment_source_text_mismatch`, `existing_translate_conflict`, `multiple_text_nodes`, and other skip reasons from the hybrid apply report.
 - `sign_segment_source_text_mismatch`, `sign_line_nbt_path_missing`, `source_text_mismatch`, `translation_too_long_for_nbt_string`, `missing_direct_command_span`, `command_json_path_missing`, `json_string_path_missing`, `missing_region_chunk_anchor`, and other skip reasons from apply reports.
+
+## Identity Gameplay QA
+
+Static identity QA proves only that scanner-defined groups use consistent translation keys and translations. For currencies, quest items, keys, named NPCs, and predicate-driven rewards, also test a fresh save in game:
+
+1. obtain each item from every relevant producer;
+2. use it in each villager trade or menu consumer;
+3. test `clear`, `execute if items`, predicates, quest completion, and rewards;
+4. reload the map and repeat one representative path;
+5. verify similarly named items with different lore/custom data were not merged.
+
+Do not generalize a raw global string replacement as the fix for identity failures. Repair canonical keys through exact scanner anchors and regenerate the copied map.
 
 ## Workpack QA
 

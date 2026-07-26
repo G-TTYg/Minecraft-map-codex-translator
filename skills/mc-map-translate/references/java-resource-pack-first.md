@@ -38,6 +38,7 @@ Many Java maps already ship a map-specific resource pack as `resources.zip` besi
 - Preserve map-owned assets unless the user explicitly requests asset localization or replacement.
 - Preserve the existing pack's `pack.mcmeta` during merge when it exists; it usually carries the map pack's compatibility metadata and description.
 - If the existing `resources.zip` is corrupt or unreadable, fail loudly instead of overwriting it silently.
+- For `apply-hybrid-keys`, a detected source `resources.zip` makes `--resource-pack` merged embedding the default hard requirement. Use `--allow-separate-resource-pack` only when the delivery intentionally requires players to load a separate translated pack and `DELIVERY.md` says so.
 
 `resource-pack` unit support:
 
@@ -59,6 +60,7 @@ Many Java maps already ship a map-specific resource pack as `resources.zip` besi
 
 `apply-hybrid-keys` is conservative but segment-aware. Single-node hardcoded components use the unit key. Multi-node hardcoded components use `segments[]` and `--multi-text-mode split-nodes` to inject one key per original `text` node, preserving styles and dynamic sibling components. If segment anchors or source text do not match, the unit is skipped and reported.
 Aggregated sign faces also use `segments[]`: translate the full sign first, then fill each segment so the apply step can replace each original sign line/text node with a generated key.
+Item name/lore components marked `identity_coupled` use canonical group keys instead of occurrence keys. This is required when text-component equality participates in trades, predicates, `clear`, rewards, or quest logic.
 
 `embedded-direct` unit support:
 
@@ -113,3 +115,7 @@ Do not hardcode `pack_format` unless the user specifies the Minecraft version. I
 For Java worlds, a copied world can include `resources.zip` at the world root. This makes the map prompt/load its intended resource pack without asking every player to manually install a standalone pack. Still treat this as an export of a copied world, not as an in-place modification. When the original world already includes `resources.zip`, the copied export should preserve it and overlay generated translation files.
 
 For zip input, `apply-hybrid-keys` and `apply-direct-text` can write copied output zips directly. For directory input, they can write copied directories; `apply-hybrid-keys` can also embed the generated resource pack as `resources.zip`.
+
+## Canonical Delivery
+
+After translation QA, apply, and residual audit, run `write-delivery`. `exports/DELIVERY.md` must name exactly one primary artifact and one of the four export modes. When the scan found an original `resources.zip`, copied-map delivery requires an apply/embed report proving merge mode. Interim `qa-translations --allow-incomplete` reports are rejected.
