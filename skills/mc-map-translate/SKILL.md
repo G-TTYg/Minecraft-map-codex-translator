@@ -52,6 +52,8 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
 
 2. Scan and classify text.
    - Produce `translation_units.jsonl` following `references/text-unit-contract.md`.
+   - Treat scanner rows as localization candidates, not orders to translate. Codex must independently decide whether each candidate is player-facing prose, a visible name that should remain intentional, a puzzle token, decoration, or machine/gameplay data. Do not decide from English-looking characters, `source_kind`, field names, or scanner confidence alone.
+   - For command-backed rows, parse the command's semantic roles before translating. Translate only the rendered payload, such as `say`/`tell` message text, `tellraw`/`title` JSON text nodes, bossbar names, or genuinely visible labels. Preserve command verbs, subcommands, selectors, coordinates, objective names, tags, storage/NBT paths, resource IDs, predicate values, macro variables, and comparison operands. A command may contain both translatable prose and untouchable logic.
    - For normal real-map work, also produce the indexed multi-file project layout. Use `scan --project-layout` or run `make-project-files` after scanning.
    - Record exact anchors, not only raw strings or hashes.
    - Never treat regex over `.mca` bytes as authoritative; use a parser or mark results as low confidence.
@@ -73,15 +75,19 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - Create or update `glossary.md` before translating substantial text.
    - Maintain translation progress as a TODO list. Use the Codex task checklist for the active session when available, and keep the durable project TODO at `translation_progress.md` updated with `write-progress-todo`.
    - Translate in batches small enough to keep local context visible. Write staged translations to `translations/parts/workpack_###.jsonl` as UTF-8, then merge by stable `id`.
+   - Before filling each row, make a semantic localization decision using the exact source anchor, nearby rows, command/function call context, repeated occurrences, and identity reports. Search the project indexes when the role is unclear. Handle routine decisions autonomously; ask the user only when authorial intent is genuinely unknowable and the choice materially changes gameplay, a puzzle, or a proper name.
+   - Classify each row as: translate; intentionally preserve as a name; preserve as code/logic; preserve as ASCII art; preserve as a puzzle token; or unresolved pending more context. Leave unresolved rows incomplete and in the progress TODO instead of guessing or falsely marking them translated.
    - Never count a non-empty translation as automatically reviewed. If `translation == raw`, set `review_status` to `intentional_name`, `code`, `ascii_art`, or `puzzle_token` and write a concrete `review_reason`; otherwise it remains `unreviewed_same_as_source` and the workpack is incomplete.
 
 4. Translate like a localization editor.
    - Translate with Codex reasoning over map context; do not call external translation APIs or paste batches into web translators.
+   - Exercise translator judgment rather than mechanically translating every scanner hit. The scanner establishes coverage and anchors; Codex determines meaning, visibility, intent, and whether localization is safe.
    - Prefer natural player-facing target-language phrasing over literal source-language phrasing.
    - Keep gameplay instructions unambiguous.
    - Keep role names, place names, item names, puzzle terms, factions, and UI verbs consistent.
    - Strive for the most complete safe localization possible: translate every player-facing unit that can be safely handled by the selected export modes, and record any remaining uncovered or risky text explicitly.
    - Preserve all protected tokens exactly unless a reference says they are safe to translate.
+   - Do not preserve an entire command-backed message merely because it came from a command. Preserve the command structure while translating its actual player-visible payload. Conversely, do not translate a logic token merely because it appears in a text-like NBT/JSON string.
    - Preserve escape semantics exactly: do not change a real newline into literal `\\n`, and do not change literal `\\n` into a real newline unless the source layer is intentionally being rewritten and QA notes explain it.
    - For puzzles, riddles, rhymes, lore, and jokes, preserve player experience over word-for-word meaning.
    - For units with `segments[]`, translate `raw` as the complete message first, then fill each `segments[].translation` so the preserved Minecraft component order still reads naturally.
@@ -102,6 +108,7 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - Run `qa-translations` and require `status: pass` without `--allow-incomplete`. It writes `qa/identity_qa.json` and blocks unreviewed source-equal text, incomplete sign faces, unresolved item identities, canonical-key/translation/structure conflicts, missing scanned producers for trade inputs/consumers/predicates, selector-coupled `CustomName` changes or patch modes, encoding damage, and structural errors.
    - Validate JSON text components and language JSON.
    - Check placeholders, selectors, color codes, newline counts, key coverage, untranslated residues, duplicate key conflicts, multilingual encoding integrity, and command breakage risk.
+   - Semantically review both changed and unchanged rows. Confirm every changed value was genuinely player-facing and every preserved source-language value has an evidence-based classification; a scanner hit alone is never proof that translation was appropriate.
    - Produce a short report with coverage by source kind and export mode.
    - Run `audit-english --target-locale <locale>` so source-language lang files do not consume the finding limit. Review findings by sign face and player-facing source kind; classify intentional names/codes separately from missed sentences.
    - Finish with `write-delivery` so `exports/DELIVERY.md` names exactly one canonical output, the exact one of four modes, QA report, residual audit, and apply/embed reports.
@@ -161,7 +168,9 @@ For staged AI translation, treat `index/manifest.json` as the entry point. Load 
 - Do not edit the original map in place.
 - Do not globally replace raw strings in binary world data.
 - Do not call external translation APIs, browser translators, or third-party localization services by default. Use Codex plus local project context unless the user explicitly asks otherwise.
+- Do not translate a row solely because the scanner extracted it or it contains source-language words. Decide its semantic disposition from player visibility, context, gameplay role, identity coupling, and apply safety.
 - Do not translate command keywords, selectors, scoreboard objectives, storage paths, entity IDs, item IDs, block IDs, NBT keys, or JSON text component field names.
+- Do not preserve every command-derived row wholesale. Translate the actual rendered message/component payload when it is player-facing, while leaving command grammar and logic operands exact.
 - Do not remove formatting, click events, hover events, insertion text, fonts, or keybind references.
 - Do not casually rewrite backslash escapes such as `\n`, `\t`, `\"`, `\\`, or `\uXXXX`; they may belong to JSON, SNBT, command syntax, or Minecraft rendering rather than prose.
 - Do not claim resource-pack-only coverage for hardcoded text unless the map already uses translation keys or the output mode includes key injection.

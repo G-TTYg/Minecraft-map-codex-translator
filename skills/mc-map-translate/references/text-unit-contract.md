@@ -203,6 +203,8 @@ For JSON text components stored as strings inside datapack JSON, `address.json_s
 
 For plain `.mcfunction` messages, `address.command_plain_span` stores the exact unquoted message span. For plain JSON strings inside command JSON spans, `address.command_span` stores the JSON object/array span and `address.command_json_path` stores the string path inside that decoded JSON. For plain SNBT/storage strings inside command strings, `address.command_string_span` stores the exact quoted value. `apply-direct-text` can replace these direct anchors when the current source text still exactly equals `raw`.
 
+Every unit extracted through the command scanner carries semantic review context: `context.command_text` is the complete original command line/string, `context.effective_command_text` is the command after optional `/`, macro prefix, and outer `execute ... run` wrappers are resolved, `context.command_word` names that effective command, `context.effective_command_offset` anchors it in the original string, and `context.execute_wrapped` records whether an execute wrapper was removed. Codex must use these fields to distinguish rendered payload from command grammar and logic operands before choosing whether to translate.
+
 For datapack function context, `address.function_id`, `address.function_line`, and optional `address.function_macro` identify the function and macro line status. `scan_report.json` may also include `function_call_graph` and `suspicious_text_hints`; use them for context loading and QA, not as translation rows.
 
 ## Translation JSONL

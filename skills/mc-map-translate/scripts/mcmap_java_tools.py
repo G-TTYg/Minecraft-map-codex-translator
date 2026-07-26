@@ -2694,6 +2694,15 @@ def scan_command_line(
             context["identity_command"] = identity_command
         context["identity_parse_warning"] = "item text key was found, but the containing item structure was not parsed"
         row["context"] = context
+    effective_command, effective_offset = effective_command_text(line)
+    for row in units:
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        context["command_text"] = line.rstrip("\r\n")
+        context["effective_command_text"] = effective_command
+        context["effective_command_offset"] = effective_offset
+        context["command_word"] = command_word(line)
+        context["execute_wrapped"] = bool(execute_run_tail(line))
+        row["context"] = context
     return units
 
 

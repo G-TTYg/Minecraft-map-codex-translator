@@ -238,7 +238,14 @@ class ScannerSafetyTests(unittest.TestCase):
 
         self.assertEqual(1, len(protected))
         self.assertEqual([], protected[0]["mode_support"])
-        self.assertTrue(any(row["raw"] == "Welcome" for row in rows))
+        message = next(row for row in rows if row["raw"] == "Welcome")
+        self.assertEqual(
+            "execute as @e[nbt={CustomName:'{\"text\":\"Guide\"}'}] run say Welcome",
+            message["context"]["command_text"],
+        )
+        self.assertEqual("say Welcome", message["context"]["effective_command_text"])
+        self.assertEqual("say", message["context"]["command_word"])
+        self.assertTrue(message["context"]["execute_wrapped"])
 
     def test_datapack_json_component_selector_is_indexed(self) -> None:
         payload = json.dumps(

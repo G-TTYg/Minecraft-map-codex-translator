@@ -24,10 +24,13 @@ Use this reference before apply or export.
 ## Translation QA
 
 - Translations were produced or reviewed by Codex against map context, not accepted blindly from an external machine-translation service.
+- Every scanner candidate received a semantic disposition based on player visibility, source context, gameplay role, identity coupling, and apply safety. Scanner inclusion or English-looking text alone was not treated as proof that it should be translated.
+- Command-backed units were reviewed as structured commands: rendered message/component payloads were localized where appropriate, while grammar and logic operands remained exact. Neither "translate the whole command" nor "preserve everything from commands" is acceptable.
 - Protected tokens are unchanged.
 - Selectors, placeholders, color codes, click/hover events, keybinds, and newlines are preserved or intentionally changed with notes.
 - Backslash escapes such as `\n`, `\t`, `\"`, `\\`, and `\uXXXX` are preserved at the correct layer. If changed, the QA report explains which source layer was intentionally rewritten.
 - No accidental translation of internal IDs or command syntax.
+- No visible command-generated prose was incorrectly left untranslated merely because its source was a command, function, SNBT string, or command block.
 - No untranslated English remains except deliberate names, IDs, or stylistic choices.
 - Any source-equal translation has one approved status (`intentional_name`, `code`, `ascii_art`, or `puzzle_token`) and a concrete reason. A non-empty copied source string without that evidence is `unreviewed_same_as_source`, not translated.
 - Glossary terms are consistent.
@@ -61,6 +64,7 @@ Report counts by:
 - Residual-English audit findings after export/apply.
 - Datapack function call graph coverage and suspicious text hints reviewed.
 - Player-facing units intentionally left untranslated, with concrete reasons.
+- Unresolved semantic decisions retained in the progress TODO rather than guessed or counted as complete.
 - Files reported as pending binary parser coverage.
 - Resource-pack visual text asset hints, especially PNG textures and font provider JSON that language JSON cannot cover.
 - PNG inventory versus path-filtered visual-text candidates. Do not present the full PNG inventory as confirmed untranslated text; record OCR/visual-review decisions for candidates.

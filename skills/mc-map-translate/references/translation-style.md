@@ -9,6 +9,31 @@ Use this reference before translating player-facing text.
 - Do not treat a literal draft as finished. Revise for player comprehension, tone, UI length, consistency, and Minecraft semantics before writing `translation`.
 - If the user explicitly requests an external translation service, keep it as a draft source only; Codex must still review, adapt, and QA every accepted translation against the map context.
 
+## Semantic Translation Decision
+
+The scanner finds plausible text and exact write anchors; it does not decide that every row should be localized. Codex is the semantic reviewer. For each unit, determine:
+
+1. whether a player can actually see, hear, read, or meaningfully encounter the value;
+2. whether it is prose/UI/lore or instead a command operand, identifier, lookup key, identity value, macro argument, puzzle token, name, or decoration;
+3. whether another command, NBT/component predicate, selector, trade, storage value, or datapack function compares the exact value;
+4. whether enough local context exists to preserve intent, tone, terminology, and puzzle behavior;
+5. whether the selected export mode can apply the change without altering gameplay structure.
+
+Use the exact source anchor, surrounding command, function call graph, nearby sign/book/dialogue rows, repeated occurrences, glossary, `identity_review.json`, and `selector_identity.json` as evidence. Search the indexes and source files when a short string is ambiguous. Do not infer translatability from Latin letters, scanner inclusion, `source_kind`, path hints, or confidence alone.
+
+Make routine decisions autonomously. Do not ask the user whether ordinary command syntax, selectors, IDs, or clear player-facing messages should be translated. Escalate only genuinely ambiguous authorial choices that materially affect a proper name, puzzle solution, lore meaning, or gameplay behavior.
+
+Choose one disposition per unit:
+
+- `translate`: genuinely player-facing language that is safe to localize;
+- `intentional_name`: a proper name or identity-bearing visible value deliberately retained;
+- `code`: command/logic/identifier data or a source-language fragment used mechanically;
+- `ascii_art`: visual decoration whose characters must remain exact;
+- `puzzle_token`: spelling/code/token text whose exact source form is gameplay;
+- unresolved: evidence is insufficient; leave translation empty, document the question, and keep it in the progress TODO.
+
+For commands, distinguish grammar from rendered payload. In `execute as @e[tag=guide] run say Welcome back`, translate `Welcome back` but preserve `execute`, `as`, `@e[tag=guide]`, `run`, and `say`. In `tellraw @a {"text":"Find the key"}`, translate only the text-component value. Never translate command keywords, selectors, coordinates, score objectives, tags, storage/NBT paths, resource locations, predicate operands, or macro variable names. Treat `CustomName`, item names/lore, fake-player names, and storage strings contextually because they can be display text, logic identity, or both.
+
 ## Voice
 
 - Use the target language and Java locale requested by the user. Do not default to Chinese.
@@ -80,6 +105,9 @@ Some JSON text components split one visible message across several `text` nodes 
 Before finalizing a batch, ask internally:
 
 - Does a player know what to do?
+- Is this value truly player-facing, or merely scanner-detected machine data?
+- If it came from a command, did I translate only the rendered payload and preserve every logic operand?
+- Is the exact string compared or used as identity anywhere else in the map?
 - Does the tone match the scene?
 - Are names and terms consistent with the glossary?
 - Did any protected token change?

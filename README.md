@@ -222,6 +222,9 @@ A normal scan creates:
 
 Codex should:
 
+- treat scanner rows as candidates, then independently judge player visibility, semantic role, gameplay identity, context, and write safety before deciding whether to translate;
+- parse command-backed text semantically: translate rendered `say`/`tellraw`/`title`/bossbar or other visible payloads, while preserving command grammar, selectors, coordinates, tags, objectives, paths, IDs, predicates, and macro variables;
+- make routine translate/preserve decisions autonomously and leave only genuinely ambiguous, gameplay-significant choices unresolved for user review;
 - translate with map context, not isolated strings;
 - preserve command syntax, selectors, score names, NBT paths, JSON keys, placeholders, colors, click events, hover events, fonts, keybinds, and formatting;
 - keep terminology consistent through `glossary.md`;

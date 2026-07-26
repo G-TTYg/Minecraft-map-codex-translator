@@ -44,6 +44,8 @@ When a workpack contains `context.identity_coupled`, load all rows sharing its i
 
 When a workpack contains `context.selector_identity_coupled`, read `selector_identity.json` and all listed source anchors. Preserve the source unit and segments with an `intentional_name` reason; do not translate it as ordinary NPC dialogue/name text. Unmatched or dynamic selector references belong in the runtime QA TODO, not in an inferred identity group.
 
+Before translating any workpack row, assign its semantic disposition from the row context and source evidence. Scanner inclusion is not a translation decision. For command-derived rows, inspect `context.command_text` and `context.effective_command_text`, translate only the rendered payload, and preserve syntax/logic operands. If evidence is insufficient, keep the row incomplete and add it to the progress TODO instead of guessing.
+
 Do not load every file under `units/`, `workpacks/`, and `translations/parts/` at the same time.
 Do not send the workpack to an external translation service by default; translate it with Codex using the loaded context.
 
