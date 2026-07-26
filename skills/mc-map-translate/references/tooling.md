@@ -30,9 +30,10 @@ The bundled tools do not call external translation services and do not translate
 `scripts/mcmap_java_tools.py`:
 
 - `inspect`: detect Java map/package markers and Bedrock-only markers.
-- `scan`: scan Java resource-pack language JSON, datapack JSON text components, `.mcfunction` JSON text components, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Pass `--project-layout` to also create the indexed multi-file layout. NBT strings are decoded as strict UTF-8; invalid bytes are reported instead of converted to replacement characters.
+- `scan`: scan Java resource-pack language JSON, datapack JSON text components, `.mcfunction` JSON text components, command/NBT JSON spans, quoted command/SNBT JSON text components, aggregated sign faces, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Pass `--project-layout` to also create the indexed multi-file layout. `LastOutput` is excluded by default; pass `--include-last-output` only when intentionally auditing command logs. NBT strings are decoded as strict UTF-8; invalid bytes are reported instead of converted to replacement characters. `scan_report.json` includes visual text asset hints for PNG/font/model resources and a `full_localization_recommendation` prompt.
 - `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy. Blocks selected rows that contain Unicode replacement characters. When `--resource-pack` is used, embeds `resources.zip` beside the copied world's `level.dat`, including packages whose zip root is a containing folder.
-- `apply-direct-nbt-strings`: copy/extract a Java world or map zip and directly replace translated plain NBT strings in `.dat` and `.mca` files when exact anchors match. Blocks selected rows that contain Unicode replacement characters.
+- `apply-direct-nbt-strings`: copy/extract a Java world or map zip and directly replace translated plain NBT strings in `.dat` and `.mca` files when exact anchors match. For command-contained plain SNBT strings, patches only the recorded quoted `command_string_span`. Blocks selected rows that contain Unicode replacement characters.
+- `audit-english`: rescan an exported copied world or map zip for English-looking residual text in player-facing-ish command, sign, text, CustomName, display/lore, and book/page paths. It writes JSON plus a Markdown review and reports visual asset hints; it skips pure `translate` keys by default.
 - `zip-resource-pack`: zip a resource pack directory with the correct root.
 - `embed-resource-pack`: copy a Java world and add `resources.zip` to the copy.
 
@@ -46,6 +47,8 @@ python skills/mc-map-translate/scripts/mcmap_contract.py summarize-units <workdi
 python skills/mc-map-translate/scripts/mcmap_contract.py translation-status <workdir>
 python skills/mc-map-translate/scripts/mcmap_contract.py write-progress-todo <workdir>
 ```
+
+After the first scan, read `scan_review.md` and `scan_report.json`. If `full_localization_recommendation.suggest_full_translation_mode` is true, ask whether to continue with full translation mode before spending translation effort. The normal full path exports a standalone resource-pack zip, a copied map with `resources.zip`, a hybrid-keyed copied map zip when hardcoded text exists, and QA/apply reports.
 
 ## Encoding Discipline
 
@@ -98,6 +101,7 @@ Then patch a copied world or copied map zip:
 ```bash
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys <world-or-zip> --translations <workdir> --out <workdir>/exports/world-keyed --resource-pack <workdir>/exports/hybrid-resource-pack
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys <world-or-zip> --translations <workdir> --out <workdir>/exports/world-keyed.zip
+python skills/mc-map-translate/scripts/mcmap_java_tools.py audit-english <workdir>/exports/world-keyed.zip --out <workdir>/qa/residual_english_audit.json
 ```
 
 For translated plain NBT strings that cannot be key-injected:
@@ -121,14 +125,17 @@ For copied map zips with a top-level containing folder, `resources.zip` must be 
 Supported automatic patches:
 
 - `.mcfunction` JSON command spans from `function_line` and `command_span`.
+- Quoted JSON text components inside commands/SNBT from exact `command_string_span` anchors.
 - Datapack JSON text components from `json_path`.
 - Gzip/plain `.dat` NBT strings containing JSON text components or commands with JSON spans.
+- Aggregated sign faces whose `segments[]` include per-line `nbt_path` and `component_json_path`.
 - Standard gzip, zlib, or raw `.mca` chunk NBT strings with exact chunk and NBT path anchors.
 
 Safety limits:
 
 - Single-node hardcoded JSON text components use the unit `translation_key`.
 - Multi-node hardcoded JSON text components use `segments[]` by default through `--multi-text-mode split-nodes`.
+- Aggregated sign units must be translated as complete sign faces first, then split into per-line/per-node segment translations. Apply verifies every sign segment before writing the group.
 - Every target `text` value must still exactly equal the recorded source segment; otherwise the unit is skipped.
 - Existing `translate` conflicts, missing paths, unsafe paths, nested `resources.zip!` paths, and missing/invalid segment keys are skipped and reported.
 - Plain NBT strings without JSON text component context are not hybrid-key-injection targets; they require explicit `embedded-direct` handling.
@@ -142,6 +149,7 @@ Use `--multi-text-mode skip` only when you want the old conservative behavior fo
 Safety limits:
 
 - Every target NBT string must still exactly equal the unit `raw`; otherwise it is skipped.
+- For command-contained plain SNBT strings, only the quoted `command_string_span` must match `raw`; the surrounding command is preserved.
 - `.mca` rows must include a chunk `local_index` anchor.
 - Translations longer than the Java NBT string limit are skipped.
 - JSON text components and command JSON spans are skipped here; use `apply-hybrid-keys` for those.
@@ -153,12 +161,15 @@ The bundled scanner parses gzip NBT `.dat` files and `.mca` chunks using standar
 
 Use `--no-binary` when the map is huge, when a fast first pass is enough, or when binary parsing is producing too much technical noise.
 
+The scanner reports but does not automatically localize visual text in PNG textures, custom bitmap fonts, map art, or model textures. Treat those hints as a QA checklist for full localization.
+
 ## Output Files
 
 - `project.json`: target locale, source path, namespace, and mode.
 - `translation_units.jsonl`: canonical units for translation.
 - `scan_report.json`: machine-readable counts, warnings, top files, repeated text, and binary coverage.
 - `scan_review.md`: human-readable triage summary.
+- `residual_english_audit.json` and `.md`: optional QA output from `audit-english` after export/apply.
 - `glossary.md`: seed glossary file for Codex to update before translation.
 - `translation_progress.md`: persistent workpack TODO list; keep it updated throughout translation.
 - `index/manifest.json`: entry point for staged translation.

@@ -10,7 +10,8 @@ Use this reference when the target is Java Edition and the user wants a non-inva
 - Translate existing `assets/<namespace>/lang/*.json` entries and any text already expressed through JSON text component `translate` keys.
 - Export a standalone resource pack directory or zip.
 - Optionally embed it into a copied Java save as `resources.zip`.
-- Report hardcoded text as uncovered, not translated.
+- Report hardcoded text as uncovered unless the workflow continues into hybrid key injection.
+- Report visual text in PNG/font/model assets as separate QA work; language JSON cannot translate pixels or bitmap font glyph art.
 
 `hybrid-key-injection`:
 
@@ -22,6 +23,7 @@ Use this reference when the target is Java Edition and the user wants a non-inva
 - `make-resource-pack` includes these generated hardcoded-text keys only when called with `--include-hybrid-keys`.
 
 `apply-hybrid-keys` is conservative but segment-aware. Single-node hardcoded components use the unit key. Multi-node hardcoded components use `segments[]` and `--multi-text-mode split-nodes` to inject one key per original `text` node, preserving styles and dynamic sibling components. If segment anchors or source text do not match, the unit is skipped and reported.
+Aggregated sign faces also use `segments[]`: translate the full sign first, then fill each segment so the apply step can replace each original sign line/text node with a generated key.
 
 `embedded-direct`:
 
@@ -45,6 +47,7 @@ For map-specific Java world embedding, zip the resource-pack contents with `pack
 ## Coverage Rule
 
 A resource pack can override language entries and resources. It cannot translate an arbitrary hardcoded literal in a command block, sign, book, or function unless that text is already referenced by a language key or the workflow patches a copied map to use one.
+It also cannot translate English baked into images, custom font textures, or map art without separate asset localization.
 
 ## Key Naming
 

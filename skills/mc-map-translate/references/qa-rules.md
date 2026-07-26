@@ -15,6 +15,7 @@ Use this reference before apply or export.
 - For copied worlds with embedded packs, ensure `resources.zip` is in the same directory as the copied world's `level.dat`; for map zips with a top-level containing folder, the correct path is usually `<folder>/resources.zip`, not archive-root `resources.zip`.
 - After `apply-hybrid-keys`, inspect `mcmap_hybrid_apply_report.json` and rescan the copied world or copied zip when practical.
 - After `apply-direct-nbt-strings`, inspect `mcmap_direct_nbt_apply_report.json` and rescan the copied world or copied zip when practical.
+- After export/apply, run `audit-english` on the copied world or copied zip when the target language is not English and the map has hardcoded text. Treat findings in `Command`, sign `messages`, `CustomName`, display/lore, and book/page paths as high-priority QA leads.
 
 ## Translation QA
 
@@ -27,6 +28,7 @@ Use this reference before apply or export.
 - Duplicate language keys have identical intended meaning or are split.
 - Grouped text components are translated as complete messages, not as isolated style fragments.
 - For `segments[]`, the full unit `translation` and each segment translation should agree semantically; segment translations should not read like unedited word-by-word fragments.
+- For aggregated sign units, the four-line `raw` is the translation source of truth. Segment translations should preserve readable sign layout in the target language, not mechanically translate each source line.
 - Target-language scripts, accents, punctuation width, right-to-left text, emoji, and Minecraft section sign formatting survive scan, edit, merge, export, and apply without corruption.
 - Stiff literal phrasing, context-inconsistent terminology, untranslated player-facing residues, and unexplained skipped difficult text are treated as QA failures.
 
@@ -41,8 +43,12 @@ Report counts by:
 - Units requiring `hybrid-key-injection`.
 - Units requiring `embedded-direct`.
 - Low-confidence anchors needing manual review.
+- Excluded `LastOutput` count and whether `--include-last-output` was intentionally used.
+- Aggregated sign groups and segment coverage.
+- Residual-English audit findings after export/apply.
 - Player-facing units intentionally left untranslated, with concrete reasons.
 - Files reported as pending binary parser coverage.
+- Resource-pack visual text asset hints, especially PNG textures and font provider JSON that language JSON cannot cover.
 - Top repeated raw strings and top source files from `scan_review.md`.
 - Any encoding or font-rendering risks found during table round-trip, resource-pack export, copied-world apply, or in-game review.
 
@@ -57,7 +63,7 @@ For any world patch, report:
 - Known unhandled source kinds.
 - Commands or text components that could not be safely transformed.
 - `segment_count_mismatch`, `segment_source_text_mismatch`, `existing_translate_conflict`, `multiple_text_nodes`, and other skip reasons from the hybrid apply report.
-- `source_text_mismatch`, `translation_too_long_for_nbt_string`, `missing_region_chunk_anchor`, and other skip reasons from the direct NBT apply report.
+- `sign_segment_source_text_mismatch`, `sign_line_nbt_path_missing`, `source_text_mismatch`, `translation_too_long_for_nbt_string`, `missing_region_chunk_anchor`, and other skip reasons from apply reports.
 
 ## Workpack QA
 

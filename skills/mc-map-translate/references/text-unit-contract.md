@@ -29,9 +29,9 @@ Use JSON Lines (`.jsonl`). Each non-empty line is one text unit.
 
 - `id`: Stable within the project. Prefer deterministic IDs from anchor plus raw text, not array index.
 - `edition`: Always `java` in this plugin.
-- `source_kind`: One of `lang`, `function`, `datapack_json`, `text_component_translate`, `command_block`, `sign`, `book`, `bossbar`, `scoreboard`, `entity_name`, `item_name`, `item_lore`, `advancement`, `title`, `tellraw`, `unknown`.
+- `source_kind`: Common values include `lang`, `function`, `datapack_json`, `text_component_translate`, `command_block`, `sign`, `book`, `bossbar`, `scoreboard`, `entity_name`, `item_name`, `item_lore`, `advancement`, `title`, `actionbar`, `tellraw`, `text_display`, `nbt_text`, and `unknown`.
 - `source_file`: Path relative to the map/package root when possible.
-- `address`: Structured anchor. Include `block_pos`, `entity_uuid`, `chunk`, `nbt_path`, `json_path`, `function_line`, `command_span`, or `lang_key` as applicable.
+- `address`: Structured anchor. Include `block_pos`, `entity_uuid`, `chunk`, `nbt_path`, `json_path`, `function_line`, `command_span`, `command_string_span`, `sign_lines`, or `lang_key` as applicable.
 - `raw`: Exact source string or exact player-facing segment.
 - `translation`: Target language translation.
 - `translation_key`: Language key used or proposed for resource-pack export.
@@ -91,6 +91,23 @@ Codex should translate `raw` first as the whole message, then fill each `segment
 
 For `hybrid-key-injection`, `apply-hybrid-keys --multi-text-mode split-nodes` replaces each segment's original `text` node with its `translation_key`, preserving surrounding styles, selectors, scores, click/hover events, keybinds, and `extra`.
 
+For aggregated sign faces, one `sign` unit may represent four physical sign lines. Its `raw` is the complete sign face joined with newlines. `context.line_texts` preserves the four source lines, `address.sign_lines[]` stores the per-line `nbt_path`, and each segment may include:
+
+```json
+{
+  "index": 0,
+  "line_index": 0,
+  "nbt_path": "root.front_text.messages[0]",
+  "json_path": "$.lines[0].text",
+  "component_json_path": "$.text",
+  "raw": "This symbol",
+  "translation": "",
+  "translation_key": "mcmap.example.sign.abc123.part_0"
+}
+```
+
+Codex should translate the complete sign first, then fill each segment so the copied-map apply step can replace each original line/text node with a `translate` key.
+
 ## Binary Anchors
 
 For `.dat` and `.mca` sources, `address` may include:
@@ -101,6 +118,10 @@ For `.dat` and `.mca` sources, `address` may include:
 These anchors are sufficient for QA and copied-world apply tooling.
 
 For JSON text component strings in `.dat` or `.mca`, `apply-hybrid-keys` can use `nbt_path`, optional `chunk`, `json_path`, and optional `command_span` to patch the copied NBT data. Plain NBT strings without `json_path` are not hybrid key-injection targets; `apply-direct-nbt-strings` can replace them directly in a copied world when the current NBT string still exactly equals `raw` and `translation` is filled.
+
+For quoted JSON text components inside command/SNBT strings, `address.command_string_span` stores the exact quoted string span. `apply-hybrid-keys` decodes the quoted JSON string, injects the generated key, and writes the string back with the original quote style.
+
+For plain SNBT strings inside command strings, `address.command_string_span` plus `address.nbt_path` allow `apply-direct-nbt-strings` to replace only that quoted value when the decoded string still exactly equals `raw`.
 
 ## Translation JSONL
 
@@ -115,6 +136,7 @@ Final translation files may contain the same schema with `translation` filled. F
 - `resource_namespace` should be present for every unit that can be exported to a resource pack.
 - `translation` must preserve every protected token exactly.
 - `segments[].json_path` and `segments[].raw` must match `context.text_nodes`.
+- Sign segments may also include `nbt_path`, `line_index`, and `component_json_path`; keep these unchanged during translation.
 - `segments[].translation_key` must use only lowercase `a-z`, digits, `_`, `.`, and `-`.
 - `edition` must be `java`.
 - JSON strings must remain valid UTF-8.

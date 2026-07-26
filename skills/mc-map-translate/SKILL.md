@@ -50,6 +50,8 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - For normal real-map work, also produce the indexed multi-file project layout. Use `scan --project-layout` or run `make-project-files` after scanning.
    - Record exact anchors, not only raw strings or hashes.
    - Never treat regex over `.mca` bytes as authoritative; use a parser or mark results as low confidence.
+   - Treat scanner coverage as a first-class QA surface. Review `scan_review.md`, `scan_report.json`, excluded `LastOutput` counts, aggregated sign groups, visual asset hints, and pending parser coverage before declaring translation coverage.
+   - After the first scan, ask the user whether to continue with full translation mode when `full_localization_recommendation.suggest_full_translation_mode` is true. Full mode means resource-pack export plus hybrid keyed copied-map output, optional embedded-direct copied-world patches for plain SNBT/NBT strings, residual-English audit, and explicit visual-asset QA.
    - Preserve command syntax, selectors, score names, NBT paths, JSON text component structure, colors, click events, hover events, newlines, and placeholders.
 
 3. Build context before translating.
@@ -108,10 +110,12 @@ python skills/mc-map-translate/scripts/mcmap_java_tools.py inspect path/to/world
 python skills/mc-map-translate/scripts/mcmap_java_tools.py scan path/to/world --out work/mymap --target ja_jp --map-slug mymap
 python skills/mc-map-translate/scripts/mcmap_java_tools.py scan path/to/world --out work/mymap --target ja_jp --map-slug mymap --project-layout --max-workpack-units 120
 python skills/mc-map-translate/scripts/mcmap_java_tools.py scan path/to/world --out work/mymap --target ja_jp --no-binary
+python skills/mc-map-translate/scripts/mcmap_java_tools.py scan path/to/world --out work/mymap --target ja_jp --include-last-output
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world --translations work/mymap/translations/translations.jsonl --out work/mymap/exports/world-keyed --resource-pack work/mymap/exports/hybrid-resource-pack
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world --translations work/mymap --out work/mymap/exports/world-keyed --resource-pack work/mymap/exports/hybrid-resource-pack
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys path/to/world.zip --translations work/mymap/translations/translations.jsonl --out work/mymap/exports/world-keyed.zip
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-direct-nbt-strings path/to/world.zip --translations work/mymap --out work/mymap/exports/world-direct-nbt.zip
+python skills/mc-map-translate/scripts/mcmap_java_tools.py audit-english path/to/exported-world-or.zip --out work/mymap/qa/residual_english_audit.json
 python skills/mc-map-translate/scripts/mcmap_java_tools.py zip-resource-pack work/mymap/exports/resource-pack --out work/mymap/exports/mymap-ja_jp-resourcepack.zip
 python skills/mc-map-translate/scripts/mcmap_java_tools.py embed-resource-pack path/to/world --resource-pack work/mymap/exports/resource-pack --out work/mymap/exports/world-with-resources
 ```
@@ -120,9 +124,9 @@ Use scanner output files directly: `translation_units.jsonl`, `scan_report.json`
 
 For staged AI translation, treat `index/manifest.json` as the entry point. Load one workpack and its listed source summaries at a time, update the matching translation part, refresh `translation_progress.md`, and use `merge-translations` before final validation/export. Export and apply commands can accept a merged JSONL file, a translation-parts directory, or the project root.
 
-`apply-hybrid-keys` is intentionally conservative. It copies/extracts the world, patches the copy, and writes `mcmap_hybrid_apply_report.json`. For single-node text components it injects the unit `translation_key`. For multi-node grouped components it uses `segments[]` and the default `--multi-text-mode split-nodes` to replace each hardcoded `text` node with its segment `translation_key`, preserving sibling selectors, scores, colors, events, keybinds, and `extra`.
+`apply-hybrid-keys` is intentionally conservative. It copies/extracts the world, patches the copy, and writes `mcmap_hybrid_apply_report.json`. For single-node text components it injects the unit `translation_key`. For multi-node grouped components and aggregated sign faces it uses `segments[]` and the default `--multi-text-mode split-nodes` to replace each hardcoded `text` node with its segment `translation_key`, preserving sibling selectors, scores, colors, events, keybinds, and `extra`. It also supports quoted command/SNBT strings that contain JSON text components through exact `command_string_span` anchors.
 
-`apply-direct-nbt-strings` is separate from hybrid key injection. It handles plain NBT strings with `mode_support=["embedded-direct"]`, `address.nbt_path`, no `json_path`, and a filled `translation`. It copies/extracts the world, replaces only exact matching NBT string values in `.dat` and `.mca` files, and writes `mcmap_direct_nbt_apply_report.json`.
+`apply-direct-nbt-strings` is separate from hybrid key injection. It handles plain NBT strings with `mode_support=["embedded-direct"]`, `address.nbt_path`, no `json_path`, and a filled `translation`. For plain SNBT strings inside a command, it patches only the exact quoted `command_string_span`, not the whole command. It copies/extracts the world, replaces only exact matching NBT string values in `.dat` and `.mca` files, and writes `mcmap_direct_nbt_apply_report.json`.
 
 ## Hard Rules
 

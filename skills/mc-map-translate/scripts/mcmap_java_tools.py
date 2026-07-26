@@ -53,6 +53,8 @@ TEXT_COMPONENT_KEYS = {
 }
 PLAIN_TEXT_PATH_HINTS = {
     "customname",
+    "custom_name",
+    "minecraft:custom_name",
     "displayname",
     "levelname",
     "title",
@@ -61,7 +63,34 @@ PLAIN_TEXT_PATH_HINTS = {
     "author",
     "filtered_title",
 }
-COMMAND_START_RE = re.compile(r"^\s*(tellraw|title|bossbar|scoreboard|team|summon|data|item|loot)\b", re.I)
+COMMAND_START_RE = re.compile(
+    r"^\s*/?\s*(tellraw|title|bossbar|scoreboard|team|summon|data|item|loot|give|setblock|execute|say|tell)\b",
+    re.I,
+)
+SIGN_NEW_TEXT_RE = re.compile(r"^(?P<base>.*\.(?:front_text|back_text)\.messages)\[(?P<index>[0-3])\]$", re.I)
+SIGN_OLD_TEXT_RE = re.compile(r"^(?P<base>.*)\.Text(?P<index>[1-4])$", re.I)
+ENGLISH_WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z']{2,}\b")
+RESOURCE_PNG_RE = re.compile(r"(?:^|[!/])assets/[^/]+/.+\.png$", re.I)
+RESOURCE_FONT_JSON_RE = re.compile(r"(?:^|[!/])assets/[^/]+/font/.+\.json$", re.I)
+RESOURCE_MODEL_JSON_RE = re.compile(r"(?:^|[!/])assets/[^/]+/models/.+\.json$", re.I)
+SNBT_TEXT_KEYS = {
+    "customname",
+    "custom_name",
+    "minecraft:custom_name",
+    "name",
+    "display.name",
+    "lore",
+    "pages",
+    "filtered_pages",
+    "written_book_content.pages",
+    "messages",
+    "front_text.messages",
+    "back_text.messages",
+    "text",
+    "title",
+    "subtitle",
+    "description",
+}
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
@@ -77,6 +106,14 @@ class NbtString:
     path: str
     value: str
     chunk: dict[str, int] | None = None
+
+
+@dataclass(frozen=True)
+class StringLiteralSpan:
+    start: int
+    end: int
+    quote: str
+    decoded: str
 
 
 class NbtReadError(ValueError):
@@ -463,7 +500,7 @@ def is_probably_internal(value: str) -> bool:
         return True
     if stripped.endswith(":") and re.search(r"[A-Za-z\u0080-\uffff]", stripped):
         return False
-    if " " not in stripped and (":" in stripped or "/" in stripped) and INTERNAL_ID_RE.match(stripped.lower()):
+    if " " not in stripped and (":" in stripped or "/" in stripped or "." in stripped) and INTERNAL_ID_RE.match(stripped.lower()):
         return True
     return False
 
@@ -488,6 +525,137 @@ def protected_tokens(value: str) -> list[str]:
         if token not in seen:
             seen.append(token)
     return seen
+
+
+def path_parts(path: str) -> list[str]:
+    return [part.lower().split("[", 1)[0] for part in path.split(".")]
+
+
+def nbt_path_leaf(path: str) -> str:
+    return path_parts(path)[-1] if path_parts(path) else ""
+
+
+def nbt_path_is_last_output(path: str) -> bool:
+    return nbt_path_leaf(path) == "lastoutput"
+
+
+def normalize_command_line(line: str) -> str:
+    stripped = line.strip()
+    if stripped.startswith("/"):
+        stripped = stripped[1:].lstrip()
+    return stripped
+
+
+def command_word(line: str) -> str:
+    stripped = normalize_command_line(line)
+    if not stripped:
+        return ""
+    return stripped.split(None, 1)[0].lower()
+
+
+def execute_run_tail(line: str) -> str:
+    stripped = normalize_command_line(line)
+    if not stripped.lower().startswith("execute "):
+        return ""
+    lowered = stripped.lower()
+    marker = " run "
+    index = lowered.rfind(marker)
+    if index == -1:
+        return ""
+    return stripped[index + len(marker) :]
+
+
+def decode_snbt_single_quoted(value: str) -> str:
+    result: list[str] = []
+    escaped = False
+    for char in value:
+        if escaped:
+            result.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        else:
+            result.append(char)
+    if escaped:
+        result.append("\\")
+    return "".join(result)
+
+
+def iter_quoted_string_literals(text: str) -> Iterable[StringLiteralSpan]:
+    index = 0
+    while index < len(text):
+        quote = text[index]
+        if quote not in {"'", '"'}:
+            index += 1
+            continue
+        escaped = False
+        cursor = index + 1
+        while cursor < len(text):
+            char = text[cursor]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                raw = text[index + 1 : cursor]
+                try:
+                    decoded = json.loads(text[index : cursor + 1]) if quote == '"' else decode_snbt_single_quoted(raw)
+                except json.JSONDecodeError:
+                    decoded = raw
+                yield StringLiteralSpan(start=index, end=cursor + 1, quote=quote, decoded=str(decoded))
+                index = cursor + 1
+                break
+            cursor += 1
+        else:
+            index += 1
+
+
+def encode_snbt_string_literal(value: str, quote: str) -> str:
+    if quote == '"':
+        return json.dumps(value, ensure_ascii=False)
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
+def span_inside_any(start: int, end: int, spans: Iterable[tuple[int, int]]) -> bool:
+    return any(outer_start <= start and end <= outer_end for outer_start, outer_end in spans)
+
+
+def span_contains_any(start: int, end: int, spans: Iterable[tuple[int, int]]) -> bool:
+    return any(start <= inner_start and inner_end <= end for inner_start, inner_end in spans)
+
+
+def snbt_key_hint_before(text: str, start: int) -> str:
+    prefix = text[:start]
+    window = prefix[-240:]
+    matches = list(re.finditer(r"([A-Za-z0-9_:.+-]+)\s*:", window))
+    if matches:
+        return matches[-1].group(1).lower()
+    return ""
+
+
+def snbt_key_is_player_text(key: str) -> bool:
+    lowered = key.lower()
+    if lowered in SNBT_TEXT_KEYS:
+        return True
+    return any(lowered.endswith(f".{hint}") for hint in SNBT_TEXT_KEYS if "." in hint)
+
+
+def source_kind_from_snbt_key(key: str, fallback: str) -> str:
+    lowered = key.lower()
+    if "customname" in lowered or "custom_name" in lowered:
+        return "entity_name"
+    if "lore" in lowered:
+        return "item_lore"
+    if lowered.endswith("name") or "display.name" in lowered:
+        return "item_name"
+    if "pages" in lowered:
+        return "book"
+    if "messages" in lowered:
+        return "sign"
+    if lowered.endswith("text"):
+        return "text_display"
+    return fallback
 
 
 def make_unit(
@@ -947,9 +1115,14 @@ def extract_text_components(
 
 
 def infer_command_source_kind(line: str, fallback: str = "function") -> str:
-    stripped = line.strip()
+    stripped = normalize_command_line(line)
+    execute_tail = execute_run_tail(stripped)
+    if execute_tail:
+        return infer_command_source_kind(execute_tail, fallback)
     lowered = stripped.lower()
     if lowered.startswith("tellraw "):
+        return "tellraw"
+    if lowered.startswith("tell "):
         return "tellraw"
     if lowered.startswith("title "):
         if " actionbar " in lowered:
@@ -970,6 +1143,73 @@ def infer_command_source_kind(line: str, fallback: str = "function") -> str:
     return fallback
 
 
+def iter_json_literal_component_spans(line: str, direct_spans: list[tuple[int, int]]) -> Iterable[tuple[int, int, Any]]:
+    for literal in iter_quoted_string_literals(line):
+        if span_inside_any(literal.start, literal.end, direct_spans) or span_contains_any(literal.start, literal.end, direct_spans):
+            continue
+        stripped = literal.decoded.strip()
+        if not (stripped.startswith("{") or stripped.startswith("[")):
+            continue
+        try:
+            obj = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not is_component_root(obj):
+            continue
+        yield literal.start, literal.end, obj
+
+
+def plain_snbt_string_units(
+    line: str,
+    *,
+    source_file: str,
+    base_address: dict[str, Any],
+    namespace: str,
+    map_slug: str,
+    fallback_kind: str,
+    confidence: str,
+    direct_spans: list[tuple[int, int]],
+    literal_json_spans: list[tuple[int, int]],
+) -> list[dict[str, Any]]:
+    units: list[dict[str, Any]] = []
+    occupied = list(direct_spans) + list(literal_json_spans)
+    for literal in iter_quoted_string_literals(line):
+        if span_inside_any(literal.start, literal.end, occupied):
+            continue
+        key_hint = snbt_key_hint_before(line, literal.start)
+        if not key_hint or not snbt_key_is_player_text(key_hint):
+            continue
+        raw = literal.decoded
+        stripped = raw.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            continue
+        if not is_player_text(raw):
+            continue
+        source_kind = source_kind_from_snbt_key(key_hint, fallback_kind)
+        address = {
+            **base_address,
+            "command_string_span": [literal.start, literal.end],
+            "command_string_quote": literal.quote,
+            "snbt_key_hint": key_hint,
+        }
+        temp_id = stable_id(source_file, json.dumps(address, sort_keys=True), raw)
+        units.append(
+            make_unit(
+                edition="java",
+                source_kind=source_kind,
+                source_file=source_file,
+                address=address,
+                raw=raw,
+                mode_support=["embedded-direct"],
+                confidence=confidence,
+                resource_namespace=namespace,
+                translation_key=generated_key(namespace, map_slug, source_kind, temp_id),
+                notes="Plain SNBT/command string from a player-facing key hint; direct copied-world patching is required.",
+            )
+        )
+    return units
+
+
 def scan_command_line(
     line: str,
     *,
@@ -982,20 +1222,51 @@ def scan_command_line(
 ) -> list[dict[str, Any]]:
     units: list[dict[str, Any]] = []
     source_kind = infer_command_source_kind(line, fallback_kind)
+    direct_component_spans: list[tuple[int, int]] = []
     for start, end, obj in iter_json_spans(line):
+        component_units = extract_text_components(
+            obj,
+            source_file=source_file,
+            source_kind=source_kind,
+            base_address={**base_address, "command_span": [start, end]},
+            json_path="$",
+            namespace=namespace,
+            map_slug=map_slug,
+            confidence=confidence,
+            notes="Command JSON text component.",
+        )
+        if component_units:
+            direct_component_spans.append((start, end))
+            units.extend(component_units)
+    literal_json_spans: list[tuple[int, int]] = []
+    for start, end, obj in iter_json_literal_component_spans(line, direct_component_spans):
+        literal_json_spans.append((start, end))
         units.extend(
             extract_text_components(
                 obj,
                 source_file=source_file,
                 source_kind=source_kind,
-                base_address={**base_address, "command_span": [start, end]},
+                base_address={**base_address, "command_string_span": [start, end]},
                 json_path="$",
                 namespace=namespace,
                 map_slug=map_slug,
                 confidence=confidence,
-                notes="Command JSON text component.",
+                notes="Quoted command/SNBT string containing a JSON text component.",
             )
         )
+    units.extend(
+        plain_snbt_string_units(
+            line,
+            source_file=source_file,
+            base_address=base_address,
+            namespace=namespace,
+            map_slug=map_slug,
+            fallback_kind=source_kind,
+            confidence="low" if confidence == "medium" else confidence,
+            direct_spans=direct_component_spans,
+            literal_json_spans=literal_json_spans,
+        )
+    )
     return units
 
 
@@ -1133,13 +1404,14 @@ def source_kind_from_nbt_path(path: str, value: str) -> str:
     lowered = path.lower()
     if ".command" in lowered or COMMAND_START_RE.match(value):
         return "command_block"
-    if "customname" in lowered:
+    leaf = nbt_path_leaf(path)
+    if "customname" in lowered or "custom_name" in lowered:
         return "entity_name"
     if "lore" in lowered:
         return "item_lore"
-    if ".pages" in lowered or ".filteredpages" in lowered:
+    if ".pages" in lowered or ".filteredpages" in lowered or "written_book_content.pages" in lowered:
         return "book"
-    if "front_text" in lowered or "back_text" in lowered or lowered.endswith(".text1") or lowered.endswith(".text2"):
+    if "front_text" in lowered or "back_text" in lowered or SIGN_OLD_TEXT_RE.match(path):
         return "sign"
     if "bossbar" in lowered:
         return "bossbar"
@@ -1147,6 +1419,8 @@ def source_kind_from_nbt_path(path: str, value: str) -> str:
         return "scoreboard"
     if "display.name" in lowered or lowered.endswith(".name"):
         return "item_name"
+    if leaf == "text" and (".entities[" in lowered or ".block_entities[" in lowered or ".blockentities[" in lowered):
+        return "text_display"
     return "nbt_text"
 
 
@@ -1164,8 +1438,128 @@ def nbt_path_is_internal(path: str) -> bool:
 def nbt_path_is_plain_text_candidate(path: str) -> bool:
     if nbt_path_is_internal(path):
         return False
-    parts = [part.lower().split("[", 1)[0] for part in path.split(".")]
-    return any(part in PLAIN_TEXT_PATH_HINTS for part in parts)
+    lowered = path.lower()
+    parts = path_parts(path)
+    leaf = parts[-1] if parts else ""
+    if any(part in PLAIN_TEXT_PATH_HINTS for part in parts):
+        return True
+    if "front_text.messages" in lowered or "back_text.messages" in lowered:
+        return True
+    if ".pages" in lowered or ".filteredpages" in lowered or "written_book_content.pages" in lowered:
+        return True
+    if "display.lore" in lowered or "display.name" in lowered:
+        return True
+    if leaf == "text" and (".entities[" in lowered or ".block_entities[" in lowered or ".blockentities[" in lowered):
+        return True
+    return False
+
+
+def sign_line_info(path: str) -> tuple[str, int] | None:
+    match = SIGN_NEW_TEXT_RE.match(path)
+    if match:
+        return match.group("base"), int(match.group("index"))
+    match = SIGN_OLD_TEXT_RE.match(path)
+    if match:
+        return f"{match.group('base')}.Text", int(match.group("index")) - 1
+    return None
+
+
+def parse_component_string(value: str) -> Any | None:
+    stripped = value.strip()
+    if not (stripped.startswith("{") or stripped.startswith("[")):
+        return None
+    try:
+        obj = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    return obj if is_component_root(obj) else None
+
+
+def line_synthetic_json_path(line_index: int, component_json_path: str) -> str:
+    suffix = component_json_path[1:] if component_json_path.startswith("$") else f".{component_json_path}"
+    return f"$.lines[{line_index}]{suffix}"
+
+
+def build_sign_group_unit(
+    items: list[tuple[int, NbtString]],
+    *,
+    source_file: str,
+    base_path: str,
+    namespace: str,
+    map_slug: str,
+) -> tuple[dict[str, Any] | None, set[str]]:
+    line_texts = ["", "", "", ""]
+    text_nodes: list[dict[str, str]] = []
+    segments: list[dict[str, Any]] = []
+    sign_lines: list[dict[str, Any]] = []
+    grouped_paths: set[str] = set()
+    chunk = items[0][1].chunk if items else None
+
+    for line_index, item in sorted(items, key=lambda pair: pair[0]):
+        obj = parse_component_string(item.value)
+        if obj is None:
+            continue
+        context = collect_component_context(obj, "$")
+        component_nodes = context.get("text_nodes", [])
+        if not component_nodes:
+            continue
+        grouped_paths.add(item.path)
+        sign_lines.append({"line_index": line_index, "nbt_path": item.path, "json_path": "$"})
+        line_raw = "".join(str(node.get("text", "")) for node in component_nodes if isinstance(node, dict))
+        line_texts[line_index] = line_raw
+        for node in component_nodes:
+            if not isinstance(node, dict):
+                continue
+            component_path = str(node.get("json_path", ""))
+            raw = str(node.get("text", ""))
+            synthetic_path = line_synthetic_json_path(line_index, component_path)
+            text_nodes.append({"json_path": synthetic_path, "text": raw})
+            segments.append(
+                {
+                    "index": len(segments),
+                    "line_index": line_index,
+                    "nbt_path": item.path,
+                    "json_path": synthetic_path,
+                    "component_json_path": component_path,
+                    "raw": raw,
+                    "translation": "",
+                    "translation_key": "",
+                }
+            )
+
+    raw = "\n".join(line_texts).strip("\n")
+    player_segments = [segment for segment in segments if is_player_text(str(segment.get("raw", "")))]
+    if len(player_segments) <= 1 or not is_player_text(raw):
+        return None, set()
+
+    address: dict[str, Any] = {"sign_group": base_path, "sign_lines": sign_lines}
+    if chunk:
+        address["chunk"] = chunk
+    context = {
+        "text_nodes": text_nodes,
+        "sign_lines": sign_lines,
+        "line_texts": line_texts,
+        "sign_group": base_path,
+    }
+    temp_id = stable_id(source_file, json.dumps(address, sort_keys=True), raw)
+    translation_key = generated_key(namespace, map_slug, "sign", temp_id)
+    unit = make_unit(
+        edition="java",
+        source_kind="sign",
+        source_file=source_file,
+        address=address,
+        raw=raw,
+        mode_support=["hybrid-key-injection"],
+        confidence="medium",
+        resource_namespace=namespace,
+        translation_key=translation_key,
+        context=context,
+        notes="Aggregated sign text. Translate raw as the complete sign face, then fill segments per sign line/text node for safe key injection.",
+    )
+    for segment in segments:
+        segment["translation_key"] = f"{translation_key}.part_{segment['index']}"
+    unit["segments"] = segments
+    return unit, grouped_paths
 
 
 def scan_nbt_value(
@@ -1174,8 +1568,14 @@ def scan_nbt_value(
     source_file: str,
     namespace: str,
     map_slug: str,
+    include_last_output: bool = False,
+    counters: Counter[str] | None = None,
 ) -> list[dict[str, Any]]:
     value = item.value
+    if nbt_path_is_last_output(item.path) and not include_last_output:
+        if counters is not None:
+            counters["excluded_last_output"] += 1
+        return []
     if nbt_path_is_internal(item.path):
         return []
     source_kind = source_kind_from_nbt_path(item.path, value)
@@ -1184,7 +1584,7 @@ def scan_nbt_value(
         base_address["chunk"] = item.chunk
 
     units: list[dict[str, Any]] = []
-    if COMMAND_START_RE.match(value):
+    if ".command" in item.path.lower() or COMMAND_START_RE.match(value):
         units.extend(
             scan_command_line(
                 value,
@@ -1239,7 +1639,63 @@ def scan_nbt_value(
     return units
 
 
-def scan_binary_entry(entry: Entry, namespace: str, map_slug: str) -> tuple[list[dict[str, Any]], list[str]]:
+def scan_nbt_items(
+    items: list[NbtString],
+    *,
+    source_file: str,
+    namespace: str,
+    map_slug: str,
+    include_last_output: bool,
+    counters: Counter[str],
+) -> list[dict[str, Any]]:
+    units: list[dict[str, Any]] = []
+    sign_groups: dict[tuple[str, str], list[tuple[int, NbtString]]] = defaultdict(list)
+    for item in items:
+        info = sign_line_info(item.path)
+        if info is None:
+            continue
+        base_path, line_index = info
+        chunk_key = json.dumps(item.chunk or {}, sort_keys=True)
+        sign_groups[(chunk_key, base_path)].append((line_index, item))
+
+    grouped_sign_paths: set[str] = set()
+    for (_chunk_key, base_path), group_items in sign_groups.items():
+        unit, paths = build_sign_group_unit(
+            group_items,
+            source_file=source_file,
+            base_path=base_path,
+            namespace=namespace,
+            map_slug=map_slug,
+        )
+        if unit is not None:
+            units.append(unit)
+            grouped_sign_paths.update(paths)
+            counters["aggregated_sign_groups"] += 1
+
+    for item in items:
+        if item.path in grouped_sign_paths:
+            continue
+        units.extend(
+            scan_nbt_value(
+                item,
+                source_file=source_file,
+                namespace=namespace,
+                map_slug=map_slug,
+                include_last_output=include_last_output,
+                counters=counters,
+            )
+        )
+    return units
+
+
+def scan_binary_entry(
+    entry: Entry,
+    namespace: str,
+    map_slug: str,
+    *,
+    include_last_output: bool,
+    counters: Counter[str],
+) -> tuple[list[dict[str, Any]], list[str]]:
     if entry.data is None:
         return [], [f"{entry.path}: no data"]
     units: list[dict[str, Any]] = []
@@ -1249,8 +1705,16 @@ def scan_binary_entry(entry: Entry, namespace: str, map_slug: str) -> tuple[list
     if lowered.endswith(".dat"):
         try:
             nbt_data = decompress_dat_payload(entry.data)
-            for item in scan_nbt_strings(nbt_data):
-                units.extend(scan_nbt_value(item, source_file=entry.path, namespace=namespace, map_slug=map_slug))
+            units.extend(
+                scan_nbt_items(
+                    scan_nbt_strings(nbt_data),
+                    source_file=entry.path,
+                    namespace=namespace,
+                    map_slug=map_slug,
+                    include_last_output=include_last_output,
+                    counters=counters,
+                )
+            )
         except Exception as exc:
             errors.append(f"{entry.path}: {exc}")
         return units, errors
@@ -1260,8 +1724,16 @@ def scan_binary_entry(entry: Entry, namespace: str, map_slug: str) -> tuple[list
         errors.extend(region_errors)
         for chunk, nbt_data in blobs:
             try:
-                for item in scan_nbt_strings(nbt_data, chunk=chunk):
-                    units.extend(scan_nbt_value(item, source_file=entry.path, namespace=namespace, map_slug=map_slug))
+                units.extend(
+                    scan_nbt_items(
+                        scan_nbt_strings(nbt_data, chunk=chunk),
+                        source_file=entry.path,
+                        namespace=namespace,
+                        map_slug=map_slug,
+                        include_last_output=include_last_output,
+                        counters=counters,
+                    )
+                )
             except Exception as exc:
                 errors.append(f"{entry.path}: chunk {chunk.get('local_index')}: {exc}")
         return units, errors
@@ -1304,6 +1776,42 @@ def source_prefix(path: str, depth: int = 5) -> str:
     return "/".join(path.split("/")[:depth])
 
 
+def visual_text_asset_kind(path: str) -> str:
+    lowered = path.lower()
+    if RESOURCE_PNG_RE.search(lowered):
+        return "png_texture"
+    if RESOURCE_FONT_JSON_RE.search(lowered):
+        return "font_provider_json"
+    if RESOURCE_MODEL_JSON_RE.search(lowered):
+        return "model_json"
+    return ""
+
+
+def full_localization_recommendation(report: dict[str, Any]) -> dict[str, Any]:
+    reasons: list[str] = []
+    counts_by_mode = report.get("counts_by_mode", {})
+    if counts_by_mode.get("hybrid-key-injection", 0):
+        reasons.append("hardcoded JSON text components require hybrid key injection in a copied map for resource-pack-backed localization")
+    if report.get("direct_only_unit_count", 0) or report.get("plain_command_string_unit_count", 0):
+        reasons.append("plain NBT/SNBT strings require explicit embedded-direct copied-world patching")
+    visual = report.get("visual_text_asset_hints", {})
+    if visual.get("total", 0):
+        reasons.append("resource-pack image/font/model assets may contain visual text that language JSON cannot translate")
+    if report.get("pending_binary_parser_coverage"):
+        reasons.append("some binary files were pending or failed parser coverage")
+    return {
+        "ask_user_after_scan": True,
+        "suggest_full_translation_mode": bool(reasons),
+        "reasons": reasons,
+        "default_safe_exports": [
+            "standalone resource-pack zip",
+            "copied map with resources.zip",
+            "hybrid-keyed copied map zip when hardcoded text is translated",
+            "QA/apply reports",
+        ],
+    }
+
+
 def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, Any]]) -> None:
     lines = [
         "# Scan Review",
@@ -1314,6 +1822,8 @@ def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, A
         f"- Binary units: {report['binary_unit_count']}",
         f"- Pending/failed binary files: {len(report['pending_binary_parser_coverage'])}",
         f"- Encoding warnings: {report.get('encoding_warning_count', 0)}",
+        f"- Excluded LastOutput strings: {report.get('discovery_counters', {}).get('excluded_last_output', 0)}",
+        f"- Aggregated sign groups: {report.get('discovery_counters', {}).get('aggregated_sign_groups', 0)}",
         "",
         "## Counts By Kind",
         "",
@@ -1339,6 +1849,27 @@ def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, A
         lines.extend(["", "## Encoding Warnings", ""])
         for warning in report["encoding_warnings"][:20]:
             lines.append(f"- {warning}")
+    visual = report.get("visual_text_asset_hints", {})
+    if visual.get("total", 0):
+        lines.extend(["", "## Resource-Pack Visual Text Hints", ""])
+        lines.append(
+            "These assets may contain player-visible text that language JSON and hybrid key injection cannot cover; inspect or localize images/fonts separately when pursuing full coverage."
+        )
+        for key, count in sorted(visual.get("counts", {}).items()):
+            lines.append(f"- `{key}`: {count}")
+        for sample in visual.get("samples", [])[:30]:
+            lines.append(f"- `{sample.get('kind', '')}` `{sample.get('path', '')}`")
+    recommendation = report.get("full_localization_recommendation", {})
+    if recommendation:
+        lines.extend(["", "## Full Translation Mode Prompt", ""])
+        if recommendation.get("suggest_full_translation_mode"):
+            lines.append(
+                "Ask the user whether to continue with full translation mode: resource-pack export plus hybrid keyed copied map, optional embedded-direct copied-world patches, and explicit visual-asset QA."
+            )
+            for reason in recommendation.get("reasons", []):
+                lines.append(f"- {reason}")
+        else:
+            lines.append("Resource-pack-first export appears sufficient for currently scanned text, subject to in-game QA.")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -1357,10 +1888,18 @@ def scan_source(args: argparse.Namespace) -> int:
     binary_units = 0
     scanned_files = 0
     warnings: list[str] = []
+    discovery_counters: Counter[str] = Counter()
+    visual_counts: Counter[str] = Counter()
+    visual_samples: list[dict[str, str]] = []
 
     for entry in iter_entries(source):
         scanned_files += 1
         lowered = entry.path.lower()
+        visual_kind = visual_text_asset_kind(entry.path)
+        if visual_kind:
+            visual_counts[visual_kind] += 1
+            if len(visual_samples) < 100:
+                visual_samples.append({"kind": visual_kind, "path": entry.path})
         try:
             units.extend(scan_lang_file(entry, args.source_locale))
             if lowered.endswith(".mcfunction"):
@@ -1372,7 +1911,13 @@ def scan_source(args: argparse.Namespace) -> int:
                     pending_binary.append(entry.path)
                 else:
                     before = len(units)
-                    binary_found, binary_errors = scan_binary_entry(entry, namespace, map_slug)
+                    binary_found, binary_errors = scan_binary_entry(
+                        entry,
+                        namespace,
+                        map_slug,
+                        include_last_output=args.include_last_output,
+                        counters=discovery_counters,
+                    )
                     units.extend(binary_found)
                     binary_units += len(units) - before
                     if binary_errors:
@@ -1405,6 +1950,12 @@ def scan_source(args: argparse.Namespace) -> int:
     }
     write_json(out / "project.json", project)
 
+    visual_hints = {
+        "total": sum(visual_counts.values()),
+        "counts": dict(sorted(visual_counts.items())),
+        "samples": visual_samples,
+        "note": "PNG textures, font providers, and model assets may contain visual text that requires separate image/font localization or manual QA.",
+    }
     report = {
         "schema": "mc-map-java-scan-report.v2",
         "created_at": utc_now(),
@@ -1419,11 +1970,27 @@ def scan_source(args: argparse.Namespace) -> int:
         "warnings": warnings,
         "encoding_warning_count": len(encoding_warnings),
         "encoding_warnings": encoding_warnings[:200],
+        "include_last_output": bool(args.include_last_output),
+        "discovery_counters": dict(sorted(discovery_counters.items())),
+        "visual_text_asset_hints": visual_hints,
+        "direct_only_unit_count": sum(
+            1
+            for row in units
+            if "embedded-direct" in row.get("mode_support", []) and "hybrid-key-injection" not in row.get("mode_support", [])
+        ),
+        "plain_command_string_unit_count": sum(
+            1
+            for row in units
+            if isinstance(row.get("address"), dict)
+            and isinstance(row["address"].get("command_string_span"), list)
+            and not isinstance(row["address"].get("json_path"), str)
+        ),
         "counts_by_kind": count_by(units, "source_kind"),
         "counts_by_mode": count_modes(units),
         "top_source_files": top_counts(units, "source_file"),
         "top_raw": top_counts(units, "raw"),
     }
+    report["full_localization_recommendation"] = full_localization_recommendation(report)
     write_json(out / "scan_report.json", report)
     write_scan_review(out / "scan_review.md", report, units)
 
@@ -1455,6 +2022,332 @@ def scan_source(args: argparse.Namespace) -> int:
     print(f"unit_count: {len(units)}")
     print(f"binary_unit_count: {binary_units}")
     print(f"pending_binary_parser_coverage: {len(set(pending_binary))}")
+    return 0
+
+
+def has_english_words(value: str) -> bool:
+    if len(value.strip()) < 3:
+        return False
+    if is_probably_internal(value.strip()):
+        return False
+    return bool(ENGLISH_WORD_RE.search(value))
+
+
+def audit_preview(value: str, limit: int = 240) -> str:
+    clean = value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+    return clean[: limit - 3] + "..." if len(clean) > limit else clean
+
+
+def audit_add(
+    findings: list[dict[str, Any]],
+    *,
+    max_findings: int,
+    source_file: str,
+    location: dict[str, Any],
+    source_kind: str,
+    raw: str,
+    confidence: str = "medium",
+) -> None:
+    if len(findings) >= max_findings:
+        return
+    if not has_english_words(raw):
+        return
+    findings.append(
+        {
+            "source_file": source_file,
+            "location": location,
+            "source_kind": source_kind,
+            "raw_preview": audit_preview(raw),
+            "confidence": confidence,
+        }
+    )
+
+
+def nbt_path_is_audit_candidate(path: str) -> bool:
+    lowered = path.lower()
+    hints = [
+        ".command",
+        "front_text.messages",
+        "back_text.messages",
+        ".text1",
+        ".text2",
+        ".text3",
+        ".text4",
+        "customname",
+        "custom_name",
+        "display.name",
+        "display.lore",
+        ".lore",
+        ".pages",
+        "written_book_content.pages",
+        "title",
+        "subtitle",
+        "bossbar",
+    ]
+    if any(hint in lowered for hint in hints):
+        return True
+    leaf = nbt_path_leaf(path)
+    return leaf == "text" and (".entities[" in lowered or ".block_entities[" in lowered or ".blockentities[" in lowered)
+
+
+def json_path_is_audit_candidate(path: str) -> bool:
+    lowered = path.lower()
+    return any(
+        lowered.endswith(suffix)
+        for suffix in (
+            ".text",
+            ".title",
+            ".subtitle",
+            ".description",
+            ".name",
+            ".lore",
+            ".message",
+            ".messages",
+        )
+    ) or ".pages[" in lowered
+
+
+def iter_json_strings(obj: Any, path: str = "$") -> Iterable[tuple[str, str]]:
+    if isinstance(obj, str):
+        yield path, obj
+    elif isinstance(obj, dict):
+        for key, value in obj.items():
+            yield from iter_json_strings(value, f"{path}.{key}")
+    elif isinstance(obj, list):
+        for index, value in enumerate(obj):
+            yield from iter_json_strings(value, f"{path}[{index}]")
+
+
+def audit_nbt_string(
+    item: NbtString,
+    *,
+    source_file: str,
+    findings: list[dict[str, Any]],
+    max_findings: int,
+) -> None:
+    source_kind = source_kind_from_nbt_path(item.path, item.value)
+    base_location: dict[str, Any] = {"nbt_path": item.path}
+    if item.chunk:
+        base_location["chunk"] = item.chunk
+
+    if ".command" in item.path.lower() or COMMAND_START_RE.match(item.value):
+        rows = scan_command_line(
+            item.value,
+            source_file=source_file,
+            base_address=base_location,
+            namespace="audit",
+            map_slug="audit",
+            fallback_kind=source_kind,
+            confidence="low",
+        )
+        for row in rows:
+            if row.get("source_kind") == "text_component_translate":
+                continue
+            audit_add(
+                findings,
+                max_findings=max_findings,
+                source_file=source_file,
+                location=row.get("address", base_location),
+                source_kind=str(row.get("source_kind", source_kind)),
+                raw=str(row.get("raw", "")),
+                confidence="low",
+            )
+        return
+
+    obj = parse_component_string(item.value)
+    if obj is not None:
+        rows = extract_text_components(
+            obj,
+            source_file=source_file,
+            source_kind=source_kind,
+            base_address=base_location,
+            json_path="$",
+            namespace="audit",
+            map_slug="audit",
+            confidence="low",
+        )
+        for row in rows:
+            if row.get("source_kind") == "text_component_translate":
+                continue
+            audit_add(
+                findings,
+                max_findings=max_findings,
+                source_file=source_file,
+                location=row.get("address", base_location),
+                source_kind=str(row.get("source_kind", source_kind)),
+                raw=str(row.get("raw", "")),
+                confidence="low",
+            )
+        return
+
+    if nbt_path_is_audit_candidate(item.path):
+        audit_add(
+            findings,
+            max_findings=max_findings,
+            source_file=source_file,
+            location=base_location,
+            source_kind=source_kind,
+            raw=item.value,
+        )
+
+
+def audit_binary_entry(
+    entry: Entry,
+    *,
+    findings: list[dict[str, Any]],
+    max_findings: int,
+    include_last_output: bool,
+) -> list[str]:
+    errors: list[str] = []
+    if entry.data is None:
+        return [f"{entry.path}: no data"]
+    lowered = entry.path.lower()
+    try:
+        if lowered.endswith(".dat"):
+            items = scan_nbt_strings(decompress_dat_payload(entry.data))
+            for item in items:
+                if nbt_path_is_last_output(item.path) and not include_last_output:
+                    continue
+                if nbt_path_is_audit_candidate(item.path):
+                    audit_nbt_string(item, source_file=entry.path, findings=findings, max_findings=max_findings)
+        elif lowered.endswith(".mca"):
+            blobs, region_errors = iter_region_nbt(entry)
+            errors.extend(region_errors)
+            for chunk, nbt_data in blobs:
+                try:
+                    for item in scan_nbt_strings(nbt_data, chunk=chunk):
+                        if nbt_path_is_last_output(item.path) and not include_last_output:
+                            continue
+                        if nbt_path_is_audit_candidate(item.path):
+                            audit_nbt_string(item, source_file=entry.path, findings=findings, max_findings=max_findings)
+                except Exception as exc:
+                    errors.append(f"{entry.path}: chunk {chunk.get('local_index')}: {exc}")
+    except Exception as exc:
+        errors.append(f"{entry.path}: {exc}")
+    return errors
+
+
+def write_audit_markdown(path: Path, report: dict[str, Any]) -> None:
+    lines = [
+        "# Residual English Audit",
+        "",
+        f"- Source: `{report['source']}`",
+        f"- Scanned files: {report['scanned_files']}",
+        f"- Findings: {report['finding_count']}",
+        f"- Warnings: {len(report.get('warnings', []))}",
+        "",
+    ]
+    visual = report.get("visual_text_asset_hints", {})
+    if visual.get("total", 0):
+        lines.extend(["## Visual Asset Hints", ""])
+        for key, count in sorted(visual.get("counts", {}).items()):
+            lines.append(f"- `{key}`: {count}")
+        for sample in visual.get("samples", [])[:30]:
+            lines.append(f"- `{sample.get('kind', '')}` `{sample.get('path', '')}`")
+        lines.append("")
+    lines.extend(["## Findings", ""])
+    for item in report.get("findings", [])[:200]:
+        location = json.dumps(item.get("location", {}), ensure_ascii=False, sort_keys=True)
+        lines.append(
+            f"- `{item.get('source_kind', '')}` `{item.get('source_file', '')}` {location}: `{item.get('raw_preview', '')}`"
+        )
+    if report.get("warnings"):
+        lines.extend(["", "## Warnings", ""])
+        for warning in report["warnings"][:50]:
+            lines.append(f"- {warning}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def audit_english(args: argparse.Namespace) -> int:
+    source = Path(args.source).resolve()
+    out = Path(args.out).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    findings: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    scanned_files = 0
+    visual_counts: Counter[str] = Counter()
+    visual_samples: list[dict[str, str]] = []
+
+    for entry in iter_entries(source):
+        scanned_files += 1
+        lowered = entry.path.lower()
+        visual_kind = visual_text_asset_kind(entry.path)
+        if visual_kind:
+            visual_counts[visual_kind] += 1
+            if len(visual_samples) < 100:
+                visual_samples.append({"kind": visual_kind, "path": entry.path})
+        try:
+            if lowered.endswith(".mcfunction") and entry.data is not None:
+                text = decode_text(entry.data, entry.path)
+                if text is not None:
+                    for line_no, line in enumerate(text.splitlines(), start=1):
+                        stripped = line.strip()
+                        if not stripped or stripped.startswith("#"):
+                            continue
+                        if COMMAND_START_RE.match(stripped) or command_word(stripped) == "execute":
+                            audit_add(
+                                findings,
+                                max_findings=args.max_findings,
+                                source_file=entry.path,
+                                location={"function_line": line_no},
+                                source_kind=infer_command_source_kind(stripped, "function"),
+                                raw=stripped,
+                                confidence="low",
+                            )
+            elif lowered.endswith(".json") and entry.data is not None:
+                text = decode_text(entry.data, entry.path)
+                if text is None:
+                    continue
+                try:
+                    obj = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                is_lang = bool(LANG_PATH_RE.match(entry.path))
+                for json_path, value in iter_json_strings(obj):
+                    if is_lang or json_path_is_audit_candidate(json_path):
+                        audit_add(
+                            findings,
+                            max_findings=args.max_findings,
+                            source_file=entry.path,
+                            location={"json_path": json_path},
+                            source_kind="lang" if is_lang else "json_text",
+                            raw=value,
+                            confidence="low" if is_lang else "medium",
+                        )
+            elif is_binary_world_data(entry.path):
+                warnings.extend(
+                    audit_binary_entry(
+                        entry,
+                        findings=findings,
+                        max_findings=args.max_findings,
+                        include_last_output=args.include_last_output,
+                    )
+                )
+        except Exception as exc:
+            warnings.append(f"{entry.path}: {exc}")
+
+    report = {
+        "schema": "mc-map-residual-english-audit.v1",
+        "created_at": utc_now(),
+        "source": str(source),
+        "scanned_files": scanned_files,
+        "finding_count": len(findings),
+        "max_findings": args.max_findings,
+        "include_last_output": bool(args.include_last_output),
+        "findings": findings,
+        "warnings": warnings,
+        "visual_text_asset_hints": {
+            "total": sum(visual_counts.values()),
+            "counts": dict(sorted(visual_counts.items())),
+            "samples": visual_samples,
+        },
+    }
+    write_json(out, report)
+    markdown_path = out.with_suffix(".md")
+    write_audit_markdown(markdown_path, report)
+    print(f"audit_report: {out}")
+    print(f"audit_review: {markdown_path}")
+    print(f"findings: {len(findings)}")
     return 0
 
 
@@ -1552,12 +2445,24 @@ def select_hybrid_rows(rows: list[dict[str, Any]], args: argparse.Namespace) -> 
             continue
         context = row.get("context") if isinstance(row.get("context"), dict) else {}
         text_nodes = context.get("text_nodes") if isinstance(context, dict) else None
-        if not isinstance(row.get("address", {}).get("json_path"), str) or not isinstance(text_nodes, list) or not text_nodes:
+        address = row.get("address") if isinstance(row.get("address"), dict) else {}
+        normal_component = isinstance(address.get("json_path"), str) and isinstance(text_nodes, list) and bool(text_nodes)
+        sign_group = is_sign_group_row(row)
+        if not normal_component and not sign_group:
             skipped["not_json_text_component"] += 1
             continue
         selected.append(row)
 
     return selected, skipped
+
+
+def is_sign_group_row(row: dict[str, Any]) -> bool:
+    address = row.get("address") if isinstance(row.get("address"), dict) else {}
+    if str(row.get("source_kind", "")) != "sign":
+        return False
+    if not isinstance(address.get("sign_lines"), list):
+        return False
+    return any(isinstance(segment, dict) and isinstance(segment.get("nbt_path"), str) for segment in row_segments(row))
 
 
 def select_direct_nbt_rows(rows: list[dict[str, Any]], args: argparse.Namespace) -> tuple[list[dict[str, Any]], Counter[str]]:
@@ -1679,6 +2584,33 @@ def patch_json_span(value: str, start: int, end: int, row: dict[str, Any], state
     return value[:start] + dump_json_component(obj) + value[end:], True
 
 
+def patch_json_string_span(value: str, start: int, end: int, row: dict[str, Any], state: ApplyState) -> tuple[str, bool]:
+    if start < 0 or end > len(value) or start >= end:
+        state.mark_skip(row, "invalid_command_string_span")
+        return value, False
+    literal = value[start:end]
+    if len(literal) < 2 or literal[0] not in {"'", '"'} or literal[-1] != literal[0]:
+        state.mark_skip(row, "command_string_span_not_quoted")
+        return value, False
+    quote = literal[0]
+    try:
+        decoded = json.loads(literal) if quote == '"' else decode_snbt_single_quoted(literal[1:-1])
+        obj = json.loads(str(decoded).strip())
+    except json.JSONDecodeError as exc:
+        state.mark_skip(row, "command_string_json_parse_failed", str(exc))
+        return value, False
+    changed, reason = inject_component_for_unit(obj, row, state.multi_text_mode)
+    if not changed:
+        if reason == "already_applied":
+            state.mark_already(row)
+        else:
+            state.mark_skip(row, reason)
+        return value, False
+    state.mark_changed(row, str(row.get("source_file", "")))
+    encoded = encode_snbt_string_literal(dump_json_component(obj), quote)
+    return value[:start] + encoded + value[end:], True
+
+
 def patch_full_json_text(value: str, row: dict[str, Any], state: ApplyState) -> tuple[str, bool]:
     prefix_len = len(value) - len(value.lstrip())
     suffix_start = len(value.rstrip())
@@ -1701,6 +2633,134 @@ def patch_full_json_text(value: str, row: dict[str, Any], state: ApplyState) -> 
     return prefix + dump_json_component(obj) + suffix, True
 
 
+def collect_nbt_string_tags(tag: NbtTag, path: str, out: dict[str, NbtTag]) -> None:
+    if tag.tag_type == 8:
+        out[path] = tag
+        return
+    if tag.tag_type == 9:
+        _child_type, items = tag.value
+        for index, child in enumerate(items):
+            collect_nbt_string_tags(child, f"{path}[{index}]", out)
+        return
+    if tag.tag_type == 10:
+        for name, child in tag.value:
+            child_path = f"{path}.{name}" if path else name
+            collect_nbt_string_tags(child, child_path, out)
+
+
+def sign_segments_for_nbt_path(row: dict[str, Any], nbt_path: str) -> list[dict[str, Any]]:
+    return [
+        segment
+        for segment in row_segments(row)
+        if isinstance(segment, dict) and str(segment.get("nbt_path", "")) == nbt_path
+    ]
+
+
+def patch_sign_json_value(value: str, row: dict[str, Any], nbt_path: str) -> tuple[str, bool, str]:
+    segments = sign_segments_for_nbt_path(row, nbt_path)
+    if not segments:
+        return value, False, "no_segments_for_sign_line"
+    prefix_len = len(value) - len(value.lstrip())
+    suffix_start = len(value.rstrip())
+    prefix = value[:prefix_len]
+    suffix = value[suffix_start:]
+    payload = value[prefix_len:suffix_start]
+    try:
+        obj = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        return value, False, f"sign_line_json_parse_failed:{exc}"
+
+    operations: list[tuple[dict[str, Any], str]] = []
+    already = 0
+    seen_paths: set[str] = set()
+    seen_keys: set[str] = set()
+    for segment in segments:
+        component_path = str(segment.get("component_json_path") or segment.get("json_path") or "")
+        expected = str(segment.get("raw", ""))
+        key = str(segment.get("translation_key", "")).strip()
+        if not component_path or not key:
+            return value, False, "missing_sign_segment_path_or_key"
+        if component_path in seen_paths:
+            return value, False, "duplicate_sign_segment_path"
+        if key in seen_keys:
+            return value, False, "duplicate_sign_segment_key"
+        seen_paths.add(component_path)
+        seen_keys.add(key)
+        try:
+            parent_path, leaf = parent_json_path(component_path)
+            parent = get_json_path(obj, parent_path)
+        except (KeyError, ValueError) as exc:
+            return value, False, f"sign_segment_json_path_missing:{exc}"
+        if leaf != "text" or not isinstance(parent, dict):
+            return value, False, "sign_segment_not_object_text_field"
+        if parent.get("translate") == key and "text" not in parent:
+            already += 1
+            continue
+        if "translate" in parent and parent.get("translate") != key:
+            return value, False, "existing_sign_segment_translate_conflict"
+        if parent.get("text") != expected:
+            return value, False, "sign_segment_source_text_mismatch"
+        operations.append((parent, key))
+
+    if already == len(segments):
+        return value, False, "already_applied"
+    for parent, key in operations:
+        replace_text_with_translate(parent, key)
+    return prefix + dump_json_component(obj) + suffix, True, "changed"
+
+
+def patch_sign_group_rows(tree: NbtTree, rows: list[dict[str, Any]], state: ApplyState) -> bool:
+    if not rows:
+        return False
+    string_tags: dict[str, NbtTag] = {}
+    collect_nbt_string_tags(tree.root, tree.root_path, string_tags)
+    changed_any = False
+    for row in rows:
+        paths = sorted(
+            {
+                str(segment.get("nbt_path", ""))
+                for segment in row_segments(row)
+                if isinstance(segment, dict) and str(segment.get("nbt_path", ""))
+            }
+        )
+        if not paths:
+            state.mark_skip(row, "missing_sign_segment_nbt_paths")
+            continue
+        missing = [path for path in paths if path not in string_tags]
+        if missing:
+            state.mark_skip(row, "sign_line_nbt_path_missing", ", ".join(missing[:5]))
+            continue
+
+        patched_values: dict[str, str] = {}
+        changed_row = False
+        already_count = 0
+        failure = ""
+        for nbt_path in paths:
+            current = str(string_tags[nbt_path].value)
+            patched, changed, reason = patch_sign_json_value(current, row, nbt_path)
+            if reason == "already_applied":
+                already_count += 1
+            elif reason != "changed":
+                failure = reason
+                break
+            if changed:
+                patched_values[nbt_path] = patched
+                changed_row = True
+        if failure:
+            state.mark_skip(row, failure)
+            continue
+        if changed_row:
+            for nbt_path, patched in patched_values.items():
+                string_tags[nbt_path].value = patched
+            state.mark_changed(row, str(row.get("source_file", "")))
+            changed_any = True
+        elif already_count == len(paths):
+            state.mark_already(row)
+        else:
+            state.mark_skip(row, "sign_group_no_changes")
+    return changed_any
+
+
 def patch_mcfunction_file(path: Path, source_file: str, rows: list[dict[str, Any]], state: ApplyState) -> bool:
     text = path.read_text(encoding="utf-8-sig")
     lines = text.splitlines(keepends=True)
@@ -1719,7 +2779,7 @@ def patch_mcfunction_file(path: Path, source_file: str, rows: list[dict[str, Any
                 state.mark_skip(row, "function_line_missing")
             continue
         body, eol = split_eol(lines[line_no - 1])
-        span_rows: list[tuple[int, int, dict[str, Any]]] = []
+        span_rows: list[tuple[int, int, str, dict[str, Any]]] = []
         for row in line_rows:
             span = row.get("address", {}).get("command_span")
             if (
@@ -1728,11 +2788,23 @@ def patch_mcfunction_file(path: Path, source_file: str, rows: list[dict[str, Any
                 and isinstance(span[0], int)
                 and isinstance(span[1], int)
             ):
-                span_rows.append((span[0], span[1], row))
+                span_rows.append((span[0], span[1], "json", row))
+                continue
+            string_span = row.get("address", {}).get("command_string_span")
+            if (
+                isinstance(string_span, list)
+                and len(string_span) == 2
+                and isinstance(string_span[0], int)
+                and isinstance(string_span[1], int)
+            ):
+                span_rows.append((string_span[0], string_span[1], "json_string", row))
             else:
                 state.mark_skip(row, "missing_command_span")
-        for start, end, row in sorted(span_rows, key=lambda item: item[0], reverse=True):
-            body, changed = patch_json_span(body, start, end, row, state)
+        for start, end, span_kind, row in sorted(span_rows, key=lambda item: item[0], reverse=True):
+            if span_kind == "json_string":
+                body, changed = patch_json_string_span(body, start, end, row, state)
+            else:
+                body, changed = patch_json_span(body, start, end, row, state)
             if changed:
                 changed_file = True
         lines[line_no - 1] = body + eol
@@ -1762,7 +2834,7 @@ def patch_json_file(path: Path, source_file: str, rows: list[dict[str, Any]], st
 
 def patch_nbt_string_value(value: str, rows: list[dict[str, Any]], state: ApplyState) -> tuple[str, bool]:
     changed_any = False
-    command_rows: list[tuple[int, int, dict[str, Any]]] = []
+    command_rows: list[tuple[int, int, str, dict[str, Any]]] = []
     full_json_rows: list[dict[str, Any]] = []
     for row in rows:
         span = row.get("address", {}).get("command_span")
@@ -1772,12 +2844,24 @@ def patch_nbt_string_value(value: str, rows: list[dict[str, Any]], state: ApplyS
             and isinstance(span[0], int)
             and isinstance(span[1], int)
         ):
-            command_rows.append((span[0], span[1], row))
+            command_rows.append((span[0], span[1], "json", row))
+            continue
+        string_span = row.get("address", {}).get("command_string_span")
+        if (
+            isinstance(string_span, list)
+            and len(string_span) == 2
+            and isinstance(string_span[0], int)
+            and isinstance(string_span[1], int)
+        ):
+            command_rows.append((string_span[0], string_span[1], "json_string", row))
         else:
             full_json_rows.append(row)
 
-    for start, end, row in sorted(command_rows, key=lambda item: item[0], reverse=True):
-        value, changed = patch_json_span(value, start, end, row, state)
+    for start, end, span_kind, row in sorted(command_rows, key=lambda item: item[0], reverse=True):
+        if span_kind == "json_string":
+            value, changed = patch_json_string_span(value, start, end, row, state)
+        else:
+            value, changed = patch_json_span(value, start, end, row, state)
         changed_any = changed or changed_any
 
     if command_rows and full_json_rows:
@@ -1824,8 +2908,12 @@ def patch_nbt_tag_strings(
 
 def patch_nbt_blob(data: bytes, rows: list[dict[str, Any]], state: ApplyState) -> tuple[bytes, bool]:
     tree = NbtTreeReader(data).read()
+    sign_rows = [row for row in rows if is_sign_group_row(row)]
+    normal_rows = [row for row in rows if not is_sign_group_row(row)]
+    sign_changed = patch_sign_group_rows(tree, sign_rows, state)
+
     rows_by_nbt_path: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
+    for row in normal_rows:
         nbt_path = row.get("address", {}).get("nbt_path")
         if isinstance(nbt_path, str) and nbt_path:
             rows_by_nbt_path[nbt_path].append(row)
@@ -1833,10 +2921,10 @@ def patch_nbt_blob(data: bytes, rows: list[dict[str, Any]], state: ApplyState) -
             state.mark_skip(row, "missing_nbt_path")
 
     changed = patch_nbt_tag_strings(tree.root, tree.root_path, rows_by_nbt_path, state)
-    for row in rows:
+    for row in normal_rows:
         if state.row_id(row) not in state.status_by_id:
             state.mark_skip(row, "nbt_path_missing")
-    if not changed:
+    if not changed and not sign_changed:
         return data, False
     return write_nbt_tree(tree), True
 
@@ -1857,6 +2945,31 @@ def mark_direct_rows_changed(rows: list[dict[str, Any]], state: ApplyState) -> N
 
 
 def patch_direct_nbt_string_value(value: str, rows: list[dict[str, Any]], state: ApplyState) -> tuple[str, bool]:
+    span_rows: list[tuple[int, int, dict[str, Any]]] = []
+    full_rows: list[dict[str, Any]] = []
+    for row in rows:
+        string_span = row.get("address", {}).get("command_string_span")
+        if (
+            isinstance(string_span, list)
+            and len(string_span) == 2
+            and isinstance(string_span[0], int)
+            and isinstance(string_span[1], int)
+        ):
+            span_rows.append((string_span[0], string_span[1], row))
+        else:
+            full_rows.append(row)
+
+    changed_any = False
+    for start, end, row in sorted(span_rows, key=lambda item: item[0], reverse=True):
+        value, changed = patch_direct_command_string_span(value, start, end, row, state)
+        changed_any = changed or changed_any
+
+    if span_rows:
+        if full_rows:
+            mark_direct_rows_skipped(full_rows, state, "mixed_command_string_span_and_full_nbt_string")
+        return value, changed_any
+
+    rows = full_rows
     raw_values = {str(row.get("raw", "")) for row in rows}
     translations = {str(row.get("translation", "")) for row in rows}
     if len(raw_values) != 1 or len(translations) != 1:
@@ -1878,6 +2991,33 @@ def patch_direct_nbt_string_value(value: str, rows: list[dict[str, Any]], state:
 
     mark_direct_rows_changed(rows, state)
     return translation, True
+
+
+def patch_direct_command_string_span(value: str, start: int, end: int, row: dict[str, Any], state: ApplyState) -> tuple[str, bool]:
+    if start < 0 or end > len(value) or start >= end:
+        state.mark_skip(row, "invalid_command_string_span")
+        return value, False
+    literal = value[start:end]
+    if len(literal) < 2 or literal[0] not in {"'", '"'} or literal[-1] != literal[0]:
+        state.mark_skip(row, "command_string_span_not_quoted")
+        return value, False
+    quote = literal[0]
+    try:
+        decoded = json.loads(literal) if quote == '"' else decode_snbt_single_quoted(literal[1:-1])
+    except json.JSONDecodeError as exc:
+        state.mark_skip(row, "command_string_decode_failed", str(exc))
+        return value, False
+    raw = str(row.get("raw", ""))
+    translation = str(row.get("translation", ""))
+    if decoded == translation:
+        state.mark_already(row)
+        return value, False
+    if decoded != raw:
+        state.mark_skip(row, "source_text_mismatch", f"expected {raw[:120]!r}, found {str(decoded)[:120]!r}")
+        return value, False
+    encoded = encode_snbt_string_literal(translation, quote)
+    state.mark_changed(row, str(row.get("source_file", "")))
+    return value[:start] + encoded + value[end:], True
 
 
 def patch_direct_nbt_tag_strings(
@@ -2503,6 +3643,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--namespace", default="mcmap", help="namespace for generated translation keys/resource files")
     scan.add_argument("--mode", choices=["resource-pack", "hybrid-key-injection", "embedded-direct"], default="resource-pack")
     scan.add_argument("--no-binary", action="store_true", help="skip .dat/.mca NBT scanning and report them as pending")
+    scan.add_argument("--include-last-output", action="store_true", help="include command block LastOutput logs; excluded by default because they are usually vanilla execution noise")
     scan.add_argument("--max-binary-errors", type=int, default=50, help="maximum binary parser warnings to keep in scan_report.json")
     scan.add_argument("--project-layout", action="store_true", help="also create indexed multi-file project layout for staged AI translation")
     scan.add_argument("--max-workpack-units", type=int, default=120, help="maximum units per contextual workpack when --project-layout is used")
@@ -2543,6 +3684,13 @@ def build_parser() -> argparse.ArgumentParser:
     direct.add_argument("--allow-no-changes", action="store_true", help="return success even when no units changed")
     direct.add_argument("--force", action="store_true", help="replace an existing output copy")
     direct.set_defaults(func=apply_direct_nbt_strings)
+
+    audit = subparsers.add_parser("audit-english", help="audit exported Java map/resource files for residual English-looking player-facing text")
+    audit.add_argument("source", help="Java world directory or map zip to audit")
+    audit.add_argument("--out", required=True, help="output residual English audit JSON report")
+    audit.add_argument("--max-findings", type=int, default=500, help="maximum findings to record")
+    audit.add_argument("--include-last-output", action="store_true", help="include command block LastOutput logs in the audit")
+    audit.set_defaults(func=audit_english)
 
     zip_pack = subparsers.add_parser("zip-resource-pack", help="zip a resource-pack directory")
     zip_pack.add_argument("resource_pack", help="resource pack directory with pack.mcmeta at root")
