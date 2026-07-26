@@ -30,7 +30,7 @@ Aggregated sign faces also use `segments[]`: translate the full sign first, then
 - Replace literal text directly inside copied map data.
 - Use only when the user explicitly does not want a resource pack.
 - Treat as high risk and require full backup, precise anchors, and validation.
-- For plain NBT strings that are not JSON text components, use `apply-direct-nbt-strings`; it requires exact `nbt_path` anchors and exact source-text matches in copied `.dat` or `.mca` data.
+- For plain command, SNBT, datapack JSON, or NBT strings that are not JSON text components, use `apply-direct-text`; it requires exact anchors such as `command_plain_span`, `command_string_span`, `command_json_path`, `json_string_path`, or `nbt_path`, and exact source-text matches in copied data.
 
 ## Resource Pack Layout
 
@@ -77,4 +77,4 @@ Do not hardcode `pack_format` unless the user specifies the Minecraft version. I
 
 For Java worlds, a copied world can include `resources.zip` at the world root. This makes the map prompt/load its intended resource pack without asking every player to manually install a standalone pack. Still treat this as an export of a copied world, not as an in-place modification.
 
-For zip input, `apply-hybrid-keys` and `apply-direct-nbt-strings` can write copied output zips directly. For directory input, they can write copied directories; `apply-hybrid-keys` can also embed the generated resource pack as `resources.zip`.
+For zip input, `apply-hybrid-keys` and `apply-direct-text` can write copied output zips directly. For directory input, they can write copied directories; `apply-hybrid-keys` can also embed the generated resource pack as `resources.zip`.

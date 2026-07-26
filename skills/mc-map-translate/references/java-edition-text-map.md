@@ -24,6 +24,8 @@ Java maps commonly expose player-facing text through these systems:
 - `scoreboard`: Scoreboard/team display text. Be careful not to translate objective IDs or fake player names.
 - `function`: Hardcoded JSON text component found in `.mcfunction` without a more specific command kind.
 - `datapack_json`: JSON text component found in datapack JSON.
+- `storage_text`: Plain string found in storage-oriented command or JSON/SNBT value.
+- `say`: Plain `/say`, `say`, or macro `$say` message. Usually requires direct copied-world patching.
 - `command_block`: Command text from NBT, usually needs copied-map key injection or direct patching.
 - `sign`: Sign/hanging sign text from NBT.
 - `book`: Written book page or title text.
@@ -44,6 +46,7 @@ Low risk:
 Medium risk:
 
 - JSON text components in `.mcfunction` or datapack JSON.
+- JSON text components stored as strings inside datapack JSON fields.
 - NBT text components with exact NBT paths.
 - Aggregated sign faces with exact per-line `nbt_path` and segment anchors.
 - Quoted command/SNBT JSON text components with exact `command_string_span` anchors.
@@ -53,10 +56,10 @@ High risk:
 
 - Binary region edits without exact path and chunk anchor.
 - Plain NBT strings from broad path hints.
-- Plain SNBT strings inside command strings. These can be direct-patched only when the scanner records an exact `command_string_span` and the user accepts copied-world direct patching.
+- Plain `.mcfunction`, SNBT, storage, and datapack JSON strings. These can be direct-patched only when the scanner records an exact `command_plain_span`, `command_string_span`, `command_json_path`, `json_string_path`, or NBT path and the user accepts copied-world direct patching.
 - Puzzle text, spelling-dependent clues, command-generated UI, or text mixed with selectors and score values.
 
-Plain `nbt_text` units without JSON text component context are not hybrid key-injection targets. They can be applied only through explicit `embedded-direct` copied-world output with `apply-direct-nbt-strings`, or left as known uncovered text in a resource-pack-first workflow.
+Plain `nbt_text`, `storage_text`, `say`, and low-confidence custom JSON units without JSON text component context are not hybrid key-injection targets. They can be applied only through explicit `embedded-direct` copied-world output with `apply-direct-text`, or left as known uncovered text in a resource-pack-first workflow.
 `sign` units may represent an entire sign face. Translate `raw` as the whole four-line sign, then fill `segments[]` so each line/text node can be written back safely.
 
 ## Translation Key Strategy

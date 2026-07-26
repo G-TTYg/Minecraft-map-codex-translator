@@ -29,10 +29,12 @@ from mcmap_contract import ensure_segments, make_project_files, normalize_key_pi
 
 LANG_PATH_RE = re.compile(r"(?:^|.*[!/])assets/([^/]+)/lang/([a-z]{2,3}_[a-z0-9]{2,8})\.json$")
 REGION_PATH_RE = re.compile(r"(?:^|.*/)(region|entities|poi)/r\.(-?\d+)\.(-?\d+)\.mca$")
+DATAPACK_FUNCTION_RE = re.compile(r"(?:^|.*/)datapacks/[^/]+/data/([^/]+)/functions?/(.+)\.mcfunction$", re.I)
 PROTECTED_TOKEN_RE = re.compile(
     r"(@[pares](?:\[[^\]]+\])?)"
     r"|(%(?:\d+\$)?[sdif])"
     r"|(\$\{[^}]+\})"
+    r"|(\$\([^)]+\))"
     r"|(\u00a7[0-9A-FK-ORa-fk-or])"
     r"|(minecraft:[a-z0-9_./:-]+)"
 )
@@ -64,7 +66,7 @@ PLAIN_TEXT_PATH_HINTS = {
     "filtered_title",
 }
 COMMAND_START_RE = re.compile(
-    r"^\s*/?\s*(tellraw|title|bossbar|scoreboard|team|summon|data|item|loot|give|setblock|execute|say|tell)\b",
+    r"^\s*/?\s*(tellraw|title|bossbar|scoreboard|team|summon|data|item|loot|give|setblock|execute|say|tell|msg|w|function)\b",
     re.I,
 )
 SIGN_NEW_TEXT_RE = re.compile(r"^(?P<base>.*\.(?:front_text|back_text)\.messages)\[(?P<index>[0-3])\]$", re.I)
@@ -77,12 +79,17 @@ SNBT_TEXT_KEYS = {
     "customname",
     "custom_name",
     "minecraft:custom_name",
+    "minecraft:lore",
+    "minecraft:written_book_content",
+    "minecraft:written_book_content.pages",
     "name",
     "display.name",
     "lore",
     "pages",
     "filtered_pages",
+    "filteredpages",
     "written_book_content.pages",
+    "written_book_content",
     "messages",
     "front_text.messages",
     "back_text.messages",
@@ -90,6 +97,51 @@ SNBT_TEXT_KEYS = {
     "title",
     "subtitle",
     "description",
+    "dialogue",
+    "dialogues",
+    "message",
+    "menu",
+    "menus",
+    "quest",
+    "quests",
+    "task",
+    "tasks",
+    "hint",
+    "hints",
+    "label",
+    "labels",
+    "body",
+    "content",
+    "line",
+    "lines",
+    "speaker",
+}
+JSON_TEXT_PATH_HINTS = {
+    "title",
+    "subtitle",
+    "description",
+    "name",
+    "display_name",
+    "custom_name",
+    "text",
+    "message",
+    "messages",
+    "label",
+    "labels",
+    "lore",
+    "pages",
+    "page",
+    "author",
+    "body",
+    "content",
+    "dialogue",
+    "dialogues",
+    "quest",
+    "quests",
+    "task",
+    "tasks",
+    "hint",
+    "hints",
 }
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
@@ -540,10 +592,75 @@ def nbt_path_is_last_output(path: str) -> bool:
 
 
 def normalize_command_line(line: str) -> str:
-    stripped = line.strip()
-    if stripped.startswith("/"):
-        stripped = stripped[1:].lstrip()
-    return stripped
+    return effective_command_text(line)[0]
+
+
+def strip_command_prefix_at(line: str, offset: int = 0) -> tuple[str, int]:
+    cursor = offset
+    while cursor < len(line) and line[cursor].isspace():
+        cursor += 1
+    if cursor < len(line) and line[cursor] == "$":
+        cursor += 1
+        while cursor < len(line) and line[cursor].isspace():
+            cursor += 1
+    if cursor < len(line) and line[cursor] == "/":
+        cursor += 1
+        while cursor < len(line) and line[cursor].isspace():
+            cursor += 1
+    return line[cursor:], cursor
+
+
+def word_spans_outside_strings(text: str, word: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    lowered = text.lower()
+    target = word.lower()
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if lowered.startswith(target, index):
+            before = text[index - 1] if index > 0 else ""
+            after_index = index + len(target)
+            after = text[after_index] if after_index < len(text) else ""
+            if not (before.isalnum() or before == "_") and not (after.isalnum() or after == "_"):
+                end = after_index
+                while end < len(text) and text[end].isspace():
+                    end += 1
+                spans.append((index, end))
+                index = end
+                continue
+        index += 1
+    return spans
+
+
+def effective_command_text(line: str) -> tuple[str, int]:
+    text, offset = strip_command_prefix_at(line)
+    lowered = text.lower()
+    while lowered.startswith("execute "):
+        matches = word_spans_outside_strings(text, "run")
+        if not matches:
+            break
+        _match_start, match_end = matches[-1]
+        offset += match_end
+        text = text[match_end:]
+        text, extra = strip_command_prefix_at(text)
+        offset += extra
+        lowered = text.lower()
+    return text.strip(), offset + (len(text) - len(text.lstrip()))
 
 
 def command_word(line: str) -> str:
@@ -554,15 +671,39 @@ def command_word(line: str) -> str:
 
 
 def execute_run_tail(line: str) -> str:
-    stripped = normalize_command_line(line)
-    if not stripped.lower().startswith("execute "):
+    command, _offset = effective_command_text(line)
+    return command if command.lower() != strip_command_prefix_at(line)[0].strip().lower() else ""
+
+
+def is_macro_function_line(line: str) -> bool:
+    stripped = line.lstrip()
+    return stripped.startswith("$")
+
+
+def split_command_arguments(command: str) -> tuple[str, str]:
+    stripped = command.strip()
+    if not stripped:
+        return "", ""
+    parts = stripped.split(None, 1)
+    return parts[0].lower(), parts[1] if len(parts) > 1 else ""
+
+
+def function_call_target(line: str) -> str:
+    command, _offset = effective_command_text(line)
+    word, rest = split_command_arguments(command)
+    if word != "function":
         return ""
-    lowered = stripped.lower()
-    marker = " run "
-    index = lowered.rfind(marker)
-    if index == -1:
+    return rest.split(None, 1)[0] if rest.strip() else ""
+
+
+def function_id_from_path(path: str) -> str:
+    normalized = to_posix(path)
+    match = DATAPACK_FUNCTION_RE.match(normalized)
+    if not match:
         return ""
-    return stripped[index + len(marker) :]
+    namespace = match.group(1)
+    function_path = match.group(2)
+    return f"{namespace}:{function_path}"
 
 
 def decode_snbt_single_quoted(value: str) -> str:
@@ -656,6 +797,166 @@ def source_kind_from_snbt_key(key: str, fallback: str) -> str:
     if lowered.endswith("text"):
         return "text_display"
     return fallback
+
+
+def source_kind_from_plain_command(word: str, fallback: str) -> str:
+    if word == "say":
+        return "say"
+    if word in {"tell", "msg", "w"}:
+        return "tellraw"
+    return fallback
+
+
+def command_plain_message_units(
+    line: str,
+    *,
+    source_file: str,
+    base_address: dict[str, Any],
+    namespace: str,
+    map_slug: str,
+    fallback_kind: str,
+    confidence: str,
+    occupied_spans: list[tuple[int, int]],
+) -> list[dict[str, Any]]:
+    command, command_offset = effective_command_text(line)
+    word, rest = split_command_arguments(command)
+    if word not in {"say", "tell", "msg", "w"}:
+        return []
+
+    if word == "say":
+        message_start_in_command = len(word) + (len(command[len(word) :]) - len(command[len(word) :].lstrip()))
+    else:
+        target_parts = rest.split(None, 1)
+        if len(target_parts) < 2:
+            return []
+        target = target_parts[0]
+        after_word = command[len(word) :]
+        spaces_after_word = len(after_word) - len(after_word.lstrip())
+        message_start_in_command = len(word) + spaces_after_word + len(target)
+        after_target = command[message_start_in_command:]
+        message_start_in_command += len(after_target) - len(after_target.lstrip())
+
+    start = command_offset + message_start_in_command
+    end = len(line.rstrip("\r\n"))
+    if start >= end or span_inside_any(start, end, occupied_spans):
+        return []
+    raw = line[start:end]
+    if not is_player_text(raw):
+        return []
+    source_kind = source_kind_from_plain_command(word, fallback_kind)
+    address = {**base_address, "command_plain_span": [start, end], "command_word": word}
+    temp_id = stable_id(source_file, json.dumps(address, sort_keys=True), raw)
+    return [
+        make_unit(
+            edition="java",
+            source_kind=source_kind,
+            source_file=source_file,
+            address=address,
+            raw=raw,
+            mode_support=["embedded-direct"],
+            confidence="low" if confidence != "low" else confidence,
+            resource_namespace=namespace,
+            translation_key=generated_key(namespace, map_slug, source_kind, temp_id),
+            notes="Plain command message; direct copied-world or copied-function patching is required.",
+        )
+    ]
+
+
+def storage_value_string_units(
+    line: str,
+    *,
+    source_file: str,
+    base_address: dict[str, Any],
+    namespace: str,
+    map_slug: str,
+    fallback_kind: str,
+    confidence: str,
+    occupied_spans: list[tuple[int, int]],
+) -> list[dict[str, Any]]:
+    command, _command_offset = effective_command_text(line)
+    lowered = command.lower()
+    if not lowered.startswith("data modify storage "):
+        return []
+    units: list[dict[str, Any]] = []
+    occupied = list(occupied_spans)
+    for literal in iter_quoted_string_literals(line):
+        if span_inside_any(literal.start, literal.end, occupied):
+            continue
+        prefix = line[: literal.start].lower()
+        if not re.search(r"\b(?:set|append|prepend|insert\s+\d+)\s+value\s*$", prefix):
+            continue
+        raw = literal.decoded
+        if not is_player_text(raw):
+            continue
+        address = {
+            **base_address,
+            "command_string_span": [literal.start, literal.end],
+            "command_string_quote": literal.quote,
+            "command_storage_value": True,
+        }
+        temp_id = stable_id(source_file, json.dumps(address, sort_keys=True), raw)
+        units.append(
+            make_unit(
+                edition="java",
+                source_kind="storage_text",
+                source_file=source_file,
+                address=address,
+                raw=raw,
+                mode_support=["embedded-direct"],
+                confidence="low" if confidence != "low" else confidence,
+                resource_namespace=namespace,
+                translation_key=generated_key(namespace, map_slug, "storage_text", temp_id),
+                notes="Plain data modify storage value; verify it is player-facing before direct copied-world patching.",
+            )
+        )
+        occupied.append((literal.start, literal.end))
+    return units
+
+
+def command_json_plain_string_units(
+    obj: Any,
+    *,
+    span_start: int,
+    span_end: int,
+    source_file: str,
+    base_address: dict[str, Any],
+    namespace: str,
+    map_slug: str,
+    fallback_kind: str,
+    confidence: str,
+) -> list[dict[str, Any]]:
+    units: list[dict[str, Any]] = []
+    for json_string_path, value in iter_json_strings(obj):
+        if json_string_is_inside_component(obj, json_string_path):
+            continue
+        if parse_component_string(value) is not None:
+            continue
+        if not json_path_is_plain_text_candidate(json_string_path) or not is_player_text(value):
+            continue
+        source_kind = source_kind_from_json_path(json_string_path, fallback_kind)
+        if source_kind == fallback_kind and fallback_kind in {"command_block", "function"}:
+            source_kind = "storage_text"
+        address = {
+            **base_address,
+            "command_span": [span_start, span_end],
+            "command_json_path": json_string_path,
+        }
+        temp_id = stable_id(source_file, json.dumps(address, sort_keys=True), value)
+        units.append(
+            make_unit(
+                edition="java",
+                source_kind=source_kind,
+                source_file=source_file,
+                address=address,
+                raw=value,
+                mode_support=["embedded-direct"],
+                confidence="low" if confidence != "low" else confidence,
+                resource_namespace=namespace,
+                translation_key=generated_key(namespace, map_slug, source_kind, temp_id),
+                notes="Plain string inside a command JSON value; direct copied-world or copied-function patching is required.",
+            )
+        )
+    return units
 
 
 def make_unit(
@@ -870,6 +1171,19 @@ def get_json_path(obj: Any, path: str) -> Any:
                 raise KeyError(path)
             current = current[part]
     return current
+
+
+def set_json_path(obj: Any, path: str, value: Any) -> None:
+    parent_path, leaf = parent_json_path(path)
+    parent = get_json_path(obj, parent_path)
+    if isinstance(leaf, int):
+        if not isinstance(parent, list) or leaf < 0 or leaf >= len(parent):
+            raise KeyError(path)
+        parent[leaf] = value
+        return
+    if not isinstance(parent, dict) or leaf not in parent:
+        raise KeyError(path)
+    parent[leaf] = value
 
 
 def parent_json_path(path: str) -> tuple[str, str | int]:
@@ -1238,6 +1552,21 @@ def scan_command_line(
         if component_units:
             direct_component_spans.append((start, end))
             units.extend(component_units)
+        else:
+            plain_json_units = command_json_plain_string_units(
+                obj,
+                span_start=start,
+                span_end=end,
+                source_file=source_file,
+                base_address=base_address,
+                namespace=namespace,
+                map_slug=map_slug,
+                fallback_kind=source_kind,
+                confidence=confidence,
+            )
+            if plain_json_units:
+                direct_component_spans.append((start, end))
+                units.extend(plain_json_units)
     literal_json_spans: list[tuple[int, int]] = []
     for start, end, obj in iter_json_literal_component_spans(line, direct_component_spans):
         literal_json_spans.append((start, end))
@@ -1254,6 +1583,7 @@ def scan_command_line(
                 notes="Quoted command/SNBT string containing a JSON text component.",
             )
         )
+    occupied_spans = list(direct_component_spans) + list(literal_json_spans)
     units.extend(
         plain_snbt_string_units(
             line,
@@ -1267,10 +1597,56 @@ def scan_command_line(
             literal_json_spans=literal_json_spans,
         )
     )
+    occupied_spans.extend(
+        tuple(row.get("address", {}).get("command_string_span", []))
+        for row in units
+        if isinstance(row.get("address"), dict)
+        and isinstance(row["address"].get("command_string_span"), list)
+        and len(row["address"]["command_string_span"]) == 2
+    )
+    units.extend(
+        storage_value_string_units(
+            line,
+            source_file=source_file,
+            base_address=base_address,
+            namespace=namespace,
+            map_slug=map_slug,
+            fallback_kind=source_kind,
+            confidence=confidence,
+            occupied_spans=[span for span in occupied_spans if len(span) == 2],
+        )
+    )
+    occupied_spans.extend(
+        tuple(row.get("address", {}).get("command_string_span", []))
+        for row in units
+        if isinstance(row.get("address"), dict)
+        and isinstance(row["address"].get("command_string_span"), list)
+        and len(row["address"]["command_string_span"]) == 2
+    )
+    units.extend(
+        command_plain_message_units(
+            line,
+            source_file=source_file,
+            base_address=base_address,
+            namespace=namespace,
+            map_slug=map_slug,
+            fallback_kind=source_kind,
+            confidence=confidence,
+            occupied_spans=[span for span in occupied_spans if len(span) == 2],
+        )
+    )
     return units
 
 
-def scan_mcfunction(entry: Entry, namespace: str, map_slug: str) -> list[dict[str, Any]]:
+def scan_mcfunction(
+    entry: Entry,
+    namespace: str,
+    map_slug: str,
+    *,
+    counters: Counter[str] | None = None,
+    suspicious_hints: list[dict[str, Any]] | None = None,
+    function_calls: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     if entry.data is None:
         return []
     text = decode_text(entry.data, entry.path)
@@ -1278,25 +1654,202 @@ def scan_mcfunction(entry: Entry, namespace: str, map_slug: str) -> list[dict[st
         return []
 
     units: list[dict[str, Any]] = []
+    function_id = function_id_from_path(entry.path)
     for line_no, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
+        is_macro = is_macro_function_line(line)
+        if is_macro and counters is not None:
+            counters["macro_function_lines"] += 1
+        call_target = function_call_target(line)
+        if call_target and function_calls is not None:
+            function_calls.append(
+                {
+                    "source_file": entry.path,
+                    "function_id": function_id,
+                    "line": line_no,
+                    "target": call_target,
+                    "macro": is_macro,
+                }
+            )
+        base_address: dict[str, Any] = {"function_line": line_no}
+        if is_macro:
+            base_address["function_macro"] = True
+        if function_id:
+            base_address["function_id"] = function_id
+        line_units = scan_command_line(
+            line,
+            source_file=entry.path,
+            base_address=base_address,
+            namespace=namespace,
+            map_slug=map_slug,
+            fallback_kind="function",
+            confidence="high",
+        )
+        if line_units:
+            for row in line_units:
+                context = row.get("context") if isinstance(row.get("context"), dict) else {}
+                if function_id:
+                    context["function_id"] = function_id
+                context["function_line"] = line_no
+                if is_macro:
+                    context["function_macro"] = True
+                if call_target:
+                    context["function_call_target"] = call_target
+                row["context"] = context
+            units.extend(line_units)
+        elif suspicious_hints is not None and (is_macro or command_word(line) in {"say", "tell", "msg", "w"}):
+            if has_english_words(stripped) and len(suspicious_hints) < 200:
+                suspicious_hints.append(
+                    {
+                        "kind": "mcfunction_line",
+                        "source_file": entry.path,
+                        "line": line_no,
+                        "function_id": function_id,
+                        "macro": is_macro,
+                        "raw_preview": audit_preview(stripped),
+                    }
+                )
+    return units
+
+
+def json_path_name_parts(path: str) -> list[str]:
+    parts: list[str] = []
+    try:
+        for part in parse_json_path(path):
+            if isinstance(part, str):
+                lowered = part.lower()
+                parts.append(lowered)
+                if ":" in lowered:
+                    parts.append(lowered.rsplit(":", 1)[-1])
+    except ValueError:
+        for part in re.findall(r"\.([A-Za-z0-9_:-]+)", path):
+            lowered = part.lower()
+            parts.append(lowered)
+            if ":" in lowered:
+                parts.append(lowered.rsplit(":", 1)[-1])
+    return parts
+
+
+def json_path_is_plain_text_candidate(path: str) -> bool:
+    parts = json_path_name_parts(path)
+    if not parts:
+        return False
+    return any(part in JSON_TEXT_PATH_HINTS for part in parts)
+
+
+def source_kind_from_json_path(path: str, fallback: str = "datapack_json") -> str:
+    lowered = ".".join(json_path_name_parts(path))
+    if "lore" in lowered:
+        return "item_lore"
+    if "pages" in lowered or ".page" in lowered:
+        return "book"
+    if "custom_name" in lowered or lowered.endswith("name") or ".name" in lowered:
+        return "item_name"
+    if "title" in lowered:
+        return "title"
+    if "subtitle" in lowered:
+        return "title"
+    if "message" in lowered or "dialogue" in lowered:
+        return "datapack_json"
+    if lowered.endswith("text") or ".text" in lowered:
+        return "datapack_json"
+    return fallback
+
+
+def json_string_is_inside_component(obj: Any, path: str) -> bool:
+    try:
+        parent_path, _leaf = parent_json_path(path)
+        parent = get_json_path(obj, parent_path)
+    except (KeyError, ValueError):
+        return False
+    return isinstance(parent, dict) and any(key in parent for key in TEXT_COMPONENT_KEYS)
+
+
+def embedded_json_string_component_units(
+    obj: Any,
+    *,
+    source_file: str,
+    namespace: str,
+    map_slug: str,
+) -> list[dict[str, Any]]:
+    units: list[dict[str, Any]] = []
+    for json_string_path, value in iter_json_strings(obj):
+        if json_string_is_inside_component(obj, json_string_path):
+            continue
+        component = parse_component_string(value)
+        if component is None:
+            continue
         units.extend(
-            scan_command_line(
-                line,
-                source_file=entry.path,
-                base_address={"function_line": line_no},
+            extract_text_components(
+                component,
+                source_file=source_file,
+                source_kind=source_kind_from_json_path(json_string_path),
+                base_address={"json_string_path": json_string_path},
+                json_path="$",
                 namespace=namespace,
                 map_slug=map_slug,
-                fallback_kind="function",
-                confidence="high",
+                confidence="medium",
+                notes="Datapack JSON string containing a JSON text component.",
             )
         )
     return units
 
 
-def scan_json_file(entry: Entry, namespace: str, map_slug: str) -> list[dict[str, Any]]:
+def plain_json_string_units(
+    obj: Any,
+    *,
+    source_file: str,
+    namespace: str,
+    map_slug: str,
+    suspicious_hints: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    units: list[dict[str, Any]] = []
+    for json_string_path, value in iter_json_strings(obj):
+        if json_string_is_inside_component(obj, json_string_path):
+            continue
+        if parse_component_string(value) is not None:
+            continue
+        if not is_player_text(value):
+            continue
+        if json_path_is_plain_text_candidate(json_string_path):
+            source_kind = source_kind_from_json_path(json_string_path, "datapack_json_plain")
+            address = {"json_string_path": json_string_path}
+            temp_id = stable_id(source_file, json.dumps(address, sort_keys=True), value)
+            units.append(
+                make_unit(
+                    edition="java",
+                    source_kind=source_kind,
+                    source_file=source_file,
+                    address=address,
+                    raw=value,
+                    mode_support=["embedded-direct"],
+                    confidence="low",
+                    resource_namespace=namespace,
+                    translation_key=generated_key(namespace, map_slug, source_kind, temp_id),
+                    notes="Plain datapack JSON string from a player-facing path hint; direct copied-world patching is required.",
+                )
+            )
+        elif suspicious_hints is not None and len(suspicious_hints) < 200 and has_english_words(value):
+            suspicious_hints.append(
+                {
+                    "kind": "datapack_json_string",
+                    "source_file": source_file,
+                    "json_path": json_string_path,
+                    "raw_preview": audit_preview(value),
+                }
+            )
+    return units
+
+
+def scan_json_file(
+    entry: Entry,
+    namespace: str,
+    map_slug: str,
+    *,
+    suspicious_hints: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     if entry.data is None or LANG_PATH_RE.match(entry.path):
         return []
     lowered = entry.path.lower()
@@ -1309,7 +1862,7 @@ def scan_json_file(entry: Entry, namespace: str, map_slug: str) -> list[dict[str
         obj = json.loads(text)
     except json.JSONDecodeError:
         return []
-    return extract_text_components(
+    units = extract_text_components(
         obj,
         source_file=entry.path,
         source_kind="datapack_json",
@@ -1318,6 +1871,17 @@ def scan_json_file(entry: Entry, namespace: str, map_slug: str) -> list[dict[str
         namespace=namespace,
         map_slug=map_slug,
     )
+    units.extend(embedded_json_string_component_units(obj, source_file=entry.path, namespace=namespace, map_slug=map_slug))
+    units.extend(
+        plain_json_string_units(
+            obj,
+            source_file=entry.path,
+            namespace=namespace,
+            map_slug=map_slug,
+            suspicious_hints=suspicious_hints,
+        )
+    )
+    return units
 
 
 def is_binary_world_data(path: str) -> bool:
@@ -1793,10 +2357,12 @@ def full_localization_recommendation(report: dict[str, Any]) -> dict[str, Any]:
     if counts_by_mode.get("hybrid-key-injection", 0):
         reasons.append("hardcoded JSON text components require hybrid key injection in a copied map for resource-pack-backed localization")
     if report.get("direct_only_unit_count", 0) or report.get("plain_command_string_unit_count", 0):
-        reasons.append("plain NBT/SNBT strings require explicit embedded-direct copied-world patching")
+        reasons.append("plain command/SNBT/datapack JSON/NBT strings require explicit embedded-direct copied-world patching")
     visual = report.get("visual_text_asset_hints", {})
     if visual.get("total", 0):
         reasons.append("resource-pack image/font/model assets may contain visual text that language JSON cannot translate")
+    if report.get("suspicious_text_hint_count", 0):
+        reasons.append("some datapack macro/storage/JSON strings look player-facing but need confirmation before safe apply")
     if report.get("pending_binary_parser_coverage"):
         reasons.append("some binary files were pending or failed parser coverage")
     return {
@@ -1824,6 +2390,9 @@ def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, A
         f"- Encoding warnings: {report.get('encoding_warning_count', 0)}",
         f"- Excluded LastOutput strings: {report.get('discovery_counters', {}).get('excluded_last_output', 0)}",
         f"- Aggregated sign groups: {report.get('discovery_counters', {}).get('aggregated_sign_groups', 0)}",
+        f"- Macro function lines: {report.get('discovery_counters', {}).get('macro_function_lines', 0)}",
+        f"- Function calls: {report.get('function_call_count', 0)}",
+        f"- Suspicious text hints: {report.get('suspicious_text_hint_count', 0)}",
         "",
         "## Counts By Kind",
         "",
@@ -1849,6 +2418,20 @@ def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, A
         lines.extend(["", "## Encoding Warnings", ""])
         for warning in report["encoding_warnings"][:20]:
             lines.append(f"- {warning}")
+    if report.get("function_call_graph"):
+        lines.extend(["", "## Datapack Function Calls", ""])
+        for call in report["function_call_graph"][:40]:
+            lines.append(
+                f"- `{call.get('function_id', '') or call.get('source_file', '')}` line {call.get('line', '')} -> `{call.get('target', '')}`"
+            )
+    if report.get("suspicious_text_hints"):
+        lines.extend(["", "## Suspicious Text Hints", ""])
+        lines.append("These strings look player-facing but were not promoted to normal apply units; inspect them during full localization QA.")
+        for hint in report["suspicious_text_hints"][:40]:
+            location = hint.get("json_path") or hint.get("line") or ""
+            lines.append(
+                f"- `{hint.get('kind', '')}` `{hint.get('source_file', '')}` {location}: `{hint.get('raw_preview', '')}`"
+            )
     visual = report.get("visual_text_asset_hints", {})
     if visual.get("total", 0):
         lines.extend(["", "## Resource-Pack Visual Text Hints", ""])
@@ -1891,6 +2474,8 @@ def scan_source(args: argparse.Namespace) -> int:
     discovery_counters: Counter[str] = Counter()
     visual_counts: Counter[str] = Counter()
     visual_samples: list[dict[str, str]] = []
+    suspicious_text_hints: list[dict[str, Any]] = []
+    function_calls: list[dict[str, Any]] = []
 
     for entry in iter_entries(source):
         scanned_files += 1
@@ -1903,9 +2488,18 @@ def scan_source(args: argparse.Namespace) -> int:
         try:
             units.extend(scan_lang_file(entry, args.source_locale))
             if lowered.endswith(".mcfunction"):
-                units.extend(scan_mcfunction(entry, namespace, map_slug))
+                units.extend(
+                    scan_mcfunction(
+                        entry,
+                        namespace,
+                        map_slug,
+                        counters=discovery_counters,
+                        suspicious_hints=suspicious_text_hints,
+                        function_calls=function_calls,
+                    )
+                )
             elif lowered.endswith(".json"):
-                units.extend(scan_json_file(entry, namespace, map_slug))
+                units.extend(scan_json_file(entry, namespace, map_slug, suspicious_hints=suspicious_text_hints))
             elif is_binary_world_data(entry.path):
                 if args.no_binary:
                     pending_binary.append(entry.path)
@@ -1973,6 +2567,10 @@ def scan_source(args: argparse.Namespace) -> int:
         "include_last_output": bool(args.include_last_output),
         "discovery_counters": dict(sorted(discovery_counters.items())),
         "visual_text_asset_hints": visual_hints,
+        "suspicious_text_hints": suspicious_text_hints[:200],
+        "suspicious_text_hint_count": len(suspicious_text_hints),
+        "function_call_graph": function_calls[:1000],
+        "function_call_count": len(function_calls),
         "direct_only_unit_count": sum(
             1
             for row in units
@@ -2028,9 +2626,13 @@ def scan_source(args: argparse.Namespace) -> int:
 def has_english_words(value: str) -> bool:
     if len(value.strip()) < 3:
         return False
-    if is_probably_internal(value.strip()):
+    stripped = value.strip()
+    if is_probably_internal(stripped):
         return False
-    return bool(ENGLISH_WORD_RE.search(value))
+    scrubbed = stripped
+    for token in protected_tokens(stripped):
+        scrubbed = scrubbed.replace(token, " ")
+    return bool(ENGLISH_WORD_RE.search(scrubbed))
 
 
 def audit_preview(value: str, limit: int = 240) -> str:
@@ -2061,6 +2663,52 @@ def audit_add(
             "confidence": confidence,
         }
     )
+
+
+def audit_add_rows(
+    rows: list[dict[str, Any]],
+    *,
+    findings: list[dict[str, Any]],
+    max_findings: int,
+    default_confidence: str = "low",
+) -> None:
+    for row in rows:
+        if row.get("source_kind") == "text_component_translate":
+            continue
+        audit_add(
+            findings,
+            max_findings=max_findings,
+            source_file=str(row.get("source_file", "")),
+            location=row.get("address", {}) if isinstance(row.get("address"), dict) else {},
+            source_kind=str(row.get("source_kind", "unknown")),
+            raw=str(row.get("raw", "")),
+            confidence=str(row.get("confidence", default_confidence)) or default_confidence,
+        )
+
+
+def audit_add_suspicious_hints(
+    hints: list[dict[str, Any]],
+    *,
+    findings: list[dict[str, Any]],
+    max_findings: int,
+) -> None:
+    for hint in hints:
+        location: dict[str, Any] = {}
+        if isinstance(hint.get("line"), int):
+            location["line"] = hint["line"]
+        if isinstance(hint.get("json_path"), str):
+            location["json_path"] = hint["json_path"]
+        if isinstance(hint.get("function_id"), str):
+            location["function_id"] = hint["function_id"]
+        audit_add(
+            findings,
+            max_findings=max_findings,
+            source_file=str(hint.get("source_file", "")),
+            location=location,
+            source_kind=str(hint.get("kind", "suspicious_text")),
+            raw=str(hint.get("raw_preview", "")),
+            confidence="low",
+        )
 
 
 def nbt_path_is_audit_candidate(path: str) -> bool:
@@ -2278,22 +2926,17 @@ def audit_english(args: argparse.Namespace) -> int:
                 visual_samples.append({"kind": visual_kind, "path": entry.path})
         try:
             if lowered.endswith(".mcfunction") and entry.data is not None:
-                text = decode_text(entry.data, entry.path)
-                if text is not None:
-                    for line_no, line in enumerate(text.splitlines(), start=1):
-                        stripped = line.strip()
-                        if not stripped or stripped.startswith("#"):
-                            continue
-                        if COMMAND_START_RE.match(stripped) or command_word(stripped) == "execute":
-                            audit_add(
-                                findings,
-                                max_findings=args.max_findings,
-                                source_file=entry.path,
-                                location={"function_line": line_no},
-                                source_kind=infer_command_source_kind(stripped, "function"),
-                                raw=stripped,
-                                confidence="low",
-                            )
+                suspicious_hints: list[dict[str, Any]] = []
+                rows = scan_mcfunction(
+                    entry,
+                    "audit",
+                    "audit",
+                    counters=Counter(),
+                    suspicious_hints=suspicious_hints,
+                    function_calls=[],
+                )
+                audit_add_rows(rows, findings=findings, max_findings=args.max_findings)
+                audit_add_suspicious_hints(suspicious_hints, findings=findings, max_findings=args.max_findings)
             elif lowered.endswith(".json") and entry.data is not None:
                 text = decode_text(entry.data, entry.path)
                 if text is None:
@@ -2303,17 +2946,22 @@ def audit_english(args: argparse.Namespace) -> int:
                 except json.JSONDecodeError:
                     continue
                 is_lang = bool(LANG_PATH_RE.match(entry.path))
-                for json_path, value in iter_json_strings(obj):
-                    if is_lang or json_path_is_audit_candidate(json_path):
+                if is_lang:
+                    for json_path, value in iter_json_strings(obj):
                         audit_add(
                             findings,
                             max_findings=args.max_findings,
                             source_file=entry.path,
                             location={"json_path": json_path},
-                            source_kind="lang" if is_lang else "json_text",
+                            source_kind="lang",
                             raw=value,
-                            confidence="low" if is_lang else "medium",
+                            confidence="low",
                         )
+                else:
+                    suspicious_hints = []
+                    rows = scan_json_file(entry, "audit", "audit", suspicious_hints=suspicious_hints)
+                    audit_add_rows(rows, findings=findings, max_findings=args.max_findings, default_confidence="medium")
+                    audit_add_suspicious_hints(suspicious_hints, findings=findings, max_findings=args.max_findings)
             elif is_binary_world_data(entry.path):
                 warnings.extend(
                     audit_binary_entry(
@@ -2465,7 +3113,41 @@ def is_sign_group_row(row: dict[str, Any]) -> bool:
     return any(isinstance(segment, dict) and isinstance(segment.get("nbt_path"), str) for segment in row_segments(row))
 
 
-def select_direct_nbt_rows(rows: list[dict[str, Any]], args: argparse.Namespace) -> tuple[list[dict[str, Any]], Counter[str]]:
+def is_int_span(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 2
+        and isinstance(value[0], int)
+        and isinstance(value[1], int)
+        and value[0] < value[1]
+    )
+
+
+def direct_anchor_kind(row: dict[str, Any]) -> str:
+    address = row.get("address") if isinstance(row.get("address"), dict) else {}
+    source_file = str(row.get("source_file", "")).lower()
+    if isinstance(address.get("json_path"), str):
+        return ""
+
+    if source_file.endswith((".dat", ".mca")) and isinstance(address.get("nbt_path"), str) and address.get("nbt_path"):
+        return "nbt_plain_string"
+
+    if source_file.endswith(".mcfunction") and isinstance(address.get("function_line"), int):
+        if is_int_span(address.get("command_plain_span")):
+            return "mcfunction_plain_span"
+        if is_int_span(address.get("command_string_span")):
+            return "mcfunction_string_span"
+        if is_int_span(address.get("command_span")) and isinstance(address.get("command_json_path"), str):
+            return "mcfunction_json_span_string"
+        return ""
+
+    if source_file.endswith(".json") and isinstance(address.get("json_string_path"), str):
+        return "json_plain_string"
+
+    return ""
+
+
+def select_direct_text_rows(rows: list[dict[str, Any]], args: argparse.Namespace) -> tuple[list[dict[str, Any]], Counter[str]]:
     selected: list[dict[str, Any]] = []
     skipped: Counter[str] = Counter()
     source_kinds = {part.strip() for part in args.source_kind.split(",") if part.strip()}
@@ -2494,17 +3176,8 @@ def select_direct_nbt_rows(rows: list[dict[str, Any]], args: argparse.Namespace)
             skipped["filtered_unit_id"] += 1
             continue
 
-        address = row.get("address") if isinstance(row.get("address"), dict) else {}
-        if isinstance(address.get("json_path"), str) or isinstance(address.get("command_span"), list):
-            skipped["not_plain_nbt_string"] += 1
-            continue
-        if not isinstance(address.get("nbt_path"), str) or not address.get("nbt_path"):
-            skipped["missing_nbt_path"] += 1
-            continue
-
-        source_file = str(row.get("source_file", "")).lower()
-        if not (source_file.endswith(".dat") or source_file.endswith(".mca")):
-            skipped["unsupported_direct_file_type"] += 1
+        if not direct_anchor_kind(row):
+            skipped["unsupported_direct_anchor"] += 1
             continue
 
         translation = str(row.get("translation", ""))
@@ -2814,6 +3487,31 @@ def patch_mcfunction_file(path: Path, source_file: str, rows: list[dict[str, Any
     return changed_file
 
 
+def patch_json_string_component_value(obj: Any, row: dict[str, Any], state: ApplyState) -> tuple[bool, str]:
+    address = row.get("address") if isinstance(row.get("address"), dict) else {}
+    json_string_path = address.get("json_string_path")
+    if not isinstance(json_string_path, str) or not json_string_path:
+        return False, "missing_json_string_path"
+    try:
+        current = get_json_path(obj, json_string_path)
+    except (KeyError, ValueError) as exc:
+        return False, f"json_string_path_missing:{exc}"
+    if not isinstance(current, str):
+        return False, "json_string_path_not_string"
+    try:
+        component = json.loads(current.strip())
+    except json.JSONDecodeError as exc:
+        return False, f"json_string_component_parse_failed:{exc}"
+    changed, reason = inject_component_for_unit(component, row, state.multi_text_mode)
+    if not changed:
+        return False, reason
+    try:
+        set_json_path(obj, json_string_path, dump_json_component(component))
+    except (KeyError, ValueError) as exc:
+        return False, f"json_string_path_set_failed:{exc}"
+    return True, "changed"
+
+
 def patch_json_file(path: Path, source_file: str, rows: list[dict[str, Any]], state: ApplyState) -> bool:
     try:
         obj = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -2824,8 +3522,115 @@ def patch_json_file(path: Path, source_file: str, rows: list[dict[str, Any]], st
 
     changed_file = False
     for row in rows:
-        changed, reason = inject_component_for_unit(obj, row, state.multi_text_mode)
+        address = row.get("address") if isinstance(row.get("address"), dict) else {}
+        if isinstance(address.get("json_string_path"), str):
+            changed, reason = patch_json_string_component_value(obj, row, state)
+        else:
+            changed, reason = inject_component_for_unit(obj, row, state.multi_text_mode)
         changed_file = note_json_apply_result(row, source_file, changed, reason, state) or changed_file
+
+    if changed_file and not state.dry_run:
+        path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return changed_file
+
+
+def patch_direct_mcfunction_file(path: Path, source_file: str, rows: list[dict[str, Any]], state: ApplyState) -> bool:
+    text = path.read_text(encoding="utf-8-sig")
+    lines = text.splitlines(keepends=True)
+    by_line: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        line_no = row.get("address", {}).get("function_line")
+        if isinstance(line_no, int) and line_no > 0:
+            by_line[line_no].append(row)
+        else:
+            state.mark_skip(row, "missing_function_line")
+
+    changed_file = False
+    for line_no, line_rows in by_line.items():
+        if line_no < 1 or line_no > len(lines):
+            for row in line_rows:
+                state.mark_skip(row, "function_line_missing")
+            continue
+        body, eol = split_eol(lines[line_no - 1])
+        span_rows: list[tuple[int, int, str, dict[str, Any]]] = []
+        for row in line_rows:
+            address = row.get("address", {}) if isinstance(row.get("address"), dict) else {}
+            command_span = address.get("command_span")
+            if is_int_span(command_span) and isinstance(address.get("command_json_path"), str):
+                span_rows.append((command_span[0], command_span[1], "json_plain", row))
+                continue
+            plain_span = address.get("command_plain_span")
+            if is_int_span(plain_span):
+                span_rows.append((plain_span[0], plain_span[1], "plain", row))
+                continue
+            string_span = address.get("command_string_span")
+            if is_int_span(string_span):
+                span_rows.append((string_span[0], string_span[1], "string", row))
+            else:
+                state.mark_skip(row, "missing_direct_command_span")
+
+        for start, end, span_kind, group_rows in sorted(grouped_span_rows(span_rows), key=lambda item: item[0], reverse=True):
+            if span_kind == "json_plain":
+                body, changed = patch_direct_command_json_span_rows(body, start, end, group_rows, state)
+            elif len(group_rows) > 1:
+                mark_direct_rows_skipped(group_rows, state, "direct_span_conflict")
+                changed = False
+            elif span_kind == "plain":
+                body, changed = patch_direct_plain_span(body, start, end, group_rows[0], state)
+            else:
+                body, changed = patch_direct_command_string_span(body, start, end, group_rows[0], state)
+            if changed:
+                changed_file = True
+        lines[line_no - 1] = body + eol
+
+    if changed_file and not state.dry_run:
+        path.write_text("".join(lines), encoding="utf-8")
+    return changed_file
+
+
+def patch_direct_json_file(path: Path, source_file: str, rows: list[dict[str, Any]], state: ApplyState) -> bool:
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as exc:
+        for row in rows:
+            state.mark_skip(row, "json_file_parse_failed", str(exc))
+        return False
+
+    changed_file = False
+    seen_paths: set[str] = set()
+    for row in rows:
+        address = row.get("address") if isinstance(row.get("address"), dict) else {}
+        json_string_path = address.get("json_string_path")
+        if not isinstance(json_string_path, str) or not json_string_path:
+            state.mark_skip(row, "missing_json_string_path")
+            continue
+        if json_string_path in seen_paths:
+            state.mark_skip(row, "duplicate_json_string_path")
+            continue
+        seen_paths.add(json_string_path)
+        try:
+            current = get_json_path(obj, json_string_path)
+        except (KeyError, ValueError) as exc:
+            state.mark_skip(row, "json_string_path_missing", str(exc))
+            continue
+        if not isinstance(current, str):
+            state.mark_skip(row, "json_string_path_not_string")
+            continue
+        raw = str(row.get("raw", ""))
+        translation = str(row.get("translation", ""))
+        if current == translation:
+            state.mark_already(row)
+            continue
+        if current != raw:
+            state.mark_skip(row, "source_text_mismatch", f"expected {raw[:120]!r}, found {current[:120]!r}")
+            continue
+        try:
+            set_json_path(obj, json_string_path, translation)
+        except (KeyError, ValueError) as exc:
+            state.mark_skip(row, "json_string_path_set_failed", str(exc))
+            continue
+        state.mark_changed(row, source_file)
+        changed_file = True
 
     if changed_file and not state.dry_run:
         path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -2944,29 +3749,170 @@ def mark_direct_rows_changed(rows: list[dict[str, Any]], state: ApplyState) -> N
         state.mark_changed(row, str(row.get("source_file", "")))
 
 
+def patch_direct_plain_span(
+    value: str,
+    start: int,
+    end: int,
+    row: dict[str, Any],
+    state: ApplyState,
+    *,
+    max_container_utf8_bytes: int | None = None,
+) -> tuple[str, bool]:
+    if start < 0 or end > len(value) or start >= end:
+        state.mark_skip(row, "invalid_command_plain_span")
+        return value, False
+    raw = str(row.get("raw", ""))
+    translation = str(row.get("translation", ""))
+    current = value[start:end]
+    if current == translation:
+        state.mark_already(row)
+        return value, False
+    if current != raw:
+        state.mark_skip(row, "source_text_mismatch", f"expected {raw[:120]!r}, found {current[:120]!r}")
+        return value, False
+    candidate = value[:start] + translation + value[end:]
+    if max_container_utf8_bytes is not None and len(candidate.encode("utf-8")) > max_container_utf8_bytes:
+        state.mark_skip(row, "translation_too_long_for_nbt_string")
+        return value, False
+    state.mark_changed(row, str(row.get("source_file", "")))
+    return candidate, True
+
+
+def patch_direct_command_json_span_rows(
+    value: str,
+    start: int,
+    end: int,
+    rows: list[dict[str, Any]],
+    state: ApplyState,
+    *,
+    max_container_utf8_bytes: int | None = None,
+) -> tuple[str, bool]:
+    if start < 0 or end > len(value) or start >= end:
+        mark_direct_rows_skipped(rows, state, "invalid_command_span")
+        return value, False
+    try:
+        obj = json.loads(value[start:end])
+    except json.JSONDecodeError as exc:
+        mark_direct_rows_skipped(rows, state, "command_span_json_parse_failed", str(exc))
+        return value, False
+
+    operations: list[tuple[str, str, dict[str, Any]]] = []
+    already: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for row in rows:
+        address = row.get("address") if isinstance(row.get("address"), dict) else {}
+        json_path = address.get("command_json_path")
+        if not isinstance(json_path, str) or not json_path:
+            state.mark_skip(row, "missing_command_json_path")
+            continue
+        if json_path in seen_paths:
+            state.mark_skip(row, "duplicate_command_json_path")
+            continue
+        seen_paths.add(json_path)
+        try:
+            current = get_json_path(obj, json_path)
+        except (KeyError, ValueError) as exc:
+            state.mark_skip(row, "command_json_path_missing", str(exc))
+            continue
+        if not isinstance(current, str):
+            state.mark_skip(row, "command_json_path_not_string")
+            continue
+        raw = str(row.get("raw", ""))
+        translation = str(row.get("translation", ""))
+        if current == translation:
+            already.append(row)
+        elif current != raw:
+            state.mark_skip(row, "source_text_mismatch", f"expected {raw[:120]!r}, found {current[:120]!r}")
+        else:
+            operations.append((json_path, translation, row))
+
+    if not operations:
+        for row in already:
+            state.mark_already(row)
+        return value, False
+
+    for json_path, translation, _row in operations:
+        try:
+            set_json_path(obj, json_path, translation)
+        except (KeyError, ValueError) as exc:
+            for _json_path, _translation, op_row in operations:
+                state.mark_skip(op_row, "command_json_path_set_failed", str(exc))
+            return value, False
+    replacement = dump_json_component(obj)
+    candidate = value[:start] + replacement + value[end:]
+    if max_container_utf8_bytes is not None and len(candidate.encode("utf-8")) > max_container_utf8_bytes:
+        for _json_path, _translation, row in operations:
+            state.mark_skip(row, "translation_too_long_for_nbt_string")
+        return value, False
+    for row in already:
+        state.mark_already(row)
+    for _json_path, _translation, row in operations:
+        state.mark_changed(row, str(row.get("source_file", "")))
+    return candidate, True
+
+
+def grouped_span_rows(span_rows: list[tuple[int, int, str, dict[str, Any]]]) -> list[tuple[int, int, str, list[dict[str, Any]]]]:
+    groups: dict[tuple[int, int, str], list[dict[str, Any]]] = defaultdict(list)
+    for start, end, kind, row in span_rows:
+        groups[(start, end, kind)].append(row)
+    return [(start, end, kind, rows) for (start, end, kind), rows in groups.items()]
+
+
 def patch_direct_nbt_string_value(value: str, rows: list[dict[str, Any]], state: ApplyState) -> tuple[str, bool]:
-    span_rows: list[tuple[int, int, dict[str, Any]]] = []
+    span_rows: list[tuple[int, int, str, dict[str, Any]]] = []
     full_rows: list[dict[str, Any]] = []
     for row in rows:
+        command_span = row.get("address", {}).get("command_span")
+        if is_int_span(command_span) and isinstance(row.get("address", {}).get("command_json_path"), str):
+            span_rows.append((command_span[0], command_span[1], "json_plain", row))
+            continue
+        plain_span = row.get("address", {}).get("command_plain_span")
+        if is_int_span(plain_span):
+            span_rows.append((plain_span[0], plain_span[1], "plain", row))
+            continue
         string_span = row.get("address", {}).get("command_string_span")
-        if (
-            isinstance(string_span, list)
-            and len(string_span) == 2
-            and isinstance(string_span[0], int)
-            and isinstance(string_span[1], int)
-        ):
-            span_rows.append((string_span[0], string_span[1], row))
+        if is_int_span(string_span):
+            span_rows.append((string_span[0], string_span[1], "string", row))
         else:
             full_rows.append(row)
 
     changed_any = False
-    for start, end, row in sorted(span_rows, key=lambda item: item[0], reverse=True):
-        value, changed = patch_direct_command_string_span(value, start, end, row, state)
+    for start, end, span_kind, group_rows in sorted(grouped_span_rows(span_rows), key=lambda item: item[0], reverse=True):
+        if span_kind == "json_plain":
+            value, changed = patch_direct_command_json_span_rows(
+                value,
+                start,
+                end,
+                group_rows,
+                state,
+                max_container_utf8_bytes=65535,
+            )
+        elif len(group_rows) > 1:
+            mark_direct_rows_skipped(group_rows, state, "direct_span_conflict")
+            changed = False
+        elif span_kind == "plain":
+            value, changed = patch_direct_plain_span(
+                value,
+                start,
+                end,
+                group_rows[0],
+                state,
+                max_container_utf8_bytes=65535,
+            )
+        else:
+            value, changed = patch_direct_command_string_span(
+                value,
+                start,
+                end,
+                group_rows[0],
+                state,
+                max_container_utf8_bytes=65535,
+            )
         changed_any = changed or changed_any
 
     if span_rows:
         if full_rows:
-            mark_direct_rows_skipped(full_rows, state, "mixed_command_string_span_and_full_nbt_string")
+            mark_direct_rows_skipped(full_rows, state, "mixed_command_span_and_full_nbt_string")
         return value, changed_any
 
     rows = full_rows
@@ -2993,7 +3939,15 @@ def patch_direct_nbt_string_value(value: str, rows: list[dict[str, Any]], state:
     return translation, True
 
 
-def patch_direct_command_string_span(value: str, start: int, end: int, row: dict[str, Any], state: ApplyState) -> tuple[str, bool]:
+def patch_direct_command_string_span(
+    value: str,
+    start: int,
+    end: int,
+    row: dict[str, Any],
+    state: ApplyState,
+    *,
+    max_container_utf8_bytes: int | None = None,
+) -> tuple[str, bool]:
     if start < 0 or end > len(value) or start >= end:
         state.mark_skip(row, "invalid_command_string_span")
         return value, False
@@ -3016,8 +3970,12 @@ def patch_direct_command_string_span(value: str, start: int, end: int, row: dict
         state.mark_skip(row, "source_text_mismatch", f"expected {raw[:120]!r}, found {str(decoded)[:120]!r}")
         return value, False
     encoded = encode_snbt_string_literal(translation, quote)
+    candidate = value[:start] + encoded + value[end:]
+    if max_container_utf8_bytes is not None and len(candidate.encode("utf-8")) > max_container_utf8_bytes:
+        state.mark_skip(row, "translation_too_long_for_nbt_string")
+        return value, False
     state.mark_changed(row, str(row.get("source_file", "")))
-    return value[:start] + encoded + value[end:], True
+    return candidate, True
 
 
 def patch_direct_nbt_tag_strings(
@@ -3338,8 +4296,8 @@ def default_apply_report_path(out: Path, is_zip_output: bool) -> Path:
 
 def default_direct_apply_report_path(out: Path, is_zip_output: bool) -> Path:
     if is_zip_output:
-        return out.with_suffix(out.suffix + ".mcmap_direct_nbt_apply_report.json")
-    return out / "mcmap_direct_nbt_apply_report.json"
+        return out.with_suffix(out.suffix + ".mcmap_direct_text_apply_report.json")
+    return out / "mcmap_direct_text_apply_report.json"
 
 
 def world_file_path(root: Path, source_file: str) -> Path | None:
@@ -3394,7 +4352,11 @@ def patch_direct_nbt_world_copy(root: Path, rows: list[dict[str, Any]], state: A
                 state.mark_skip(row, "source_file_missing_in_copy")
             continue
         lowered = source_file.lower()
-        if lowered.endswith(".dat"):
+        if lowered.endswith(".mcfunction"):
+            patch_direct_mcfunction_file(path, source_file, file_rows, state)
+        elif lowered.endswith(".json"):
+            patch_direct_json_file(path, source_file, file_rows, state)
+        elif lowered.endswith(".dat"):
             patch_dat_file_direct(path, source_file, file_rows, state)
         elif lowered.endswith(".mca"):
             patch_region_file_direct(path, source_file, file_rows, state)
@@ -3513,19 +4475,19 @@ def apply_direct_nbt_strings(args: argparse.Namespace) -> int:
         else:
             out.unlink()
 
-    rows, selection_skipped = select_direct_nbt_rows(read_jsonl(translations), args)
+    rows, selection_skipped = select_direct_text_rows(read_jsonl(translations), args)
     encoding_errors: list[str] = []
     for row in rows:
         encoding_errors.extend(unit_encoding_errors(row))
     if encoding_errors:
-        print_blocking_errors(encoding_errors, f"direct NBT apply blocked: {len(encoding_errors)} encoding error(s)")
+        print_blocking_errors(encoding_errors, f"direct text apply blocked: {len(encoding_errors)} encoding error(s)")
         return 1
     state = ApplyState(dry_run=args.dry_run, multi_text_mode="skip")
 
     if args.report:
         report_path = Path(args.report).resolve()
     elif args.dry_run and not is_zip_output:
-        report_path = out.with_name(out.name + ".mcmap_direct_nbt_apply_report.json")
+        report_path = out.with_name(out.name + ".mcmap_direct_text_apply_report.json")
     else:
         report_path = default_direct_apply_report_path(out, is_zip_output)
 
@@ -3550,7 +4512,7 @@ def apply_direct_nbt_strings(args: argparse.Namespace) -> int:
             state.mark_skip(row, "not_processed")
 
     report = {
-        "schema": "mc-map-translate-direct-nbt-apply-report.v1",
+        "schema": "mc-map-translate-direct-text-apply-report.v1",
         "created_at": utc_now(),
         "source": str(source),
         "output": str(out),
@@ -3564,7 +4526,7 @@ def apply_direct_nbt_strings(args: argparse.Namespace) -> int:
         "changed_file_count": len(state.changed_files),
         "skipped": dict(sorted(state.skipped.items())),
         "skipped_samples": state.skipped_samples,
-        "risk": "embedded-direct plain NBT string replacement; source text must match exactly and original source is never edited",
+        "risk": "embedded-direct plain text replacement in copied .mcfunction, datapack JSON, .dat, or .mca anchors; source text must match exactly and original source is never edited",
     }
     write_json(report_path, report)
 
@@ -3671,9 +4633,12 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--force", action="store_true", help="replace an existing output copy")
     apply.set_defaults(func=apply_hybrid_keys)
 
-    direct = subparsers.add_parser("apply-direct-nbt-strings", help="patch copied Java world plain NBT strings with translated text")
+    direct = subparsers.add_parser(
+        "apply-direct-nbt-strings",
+        help="patch copied Java world direct text anchors with translated text (legacy name)",
+    )
     direct.add_argument("source", help="original Java world directory or map zip")
-    direct.add_argument("--translations", required=True, help="translation_units.jsonl or translations.jsonl containing embedded-direct plain NBT units")
+    direct.add_argument("--translations", required=True, help="translation_units.jsonl or translations.jsonl containing embedded-direct units")
     direct.add_argument("--out", required=True, help="copied world output directory or .zip")
     direct.add_argument("--min-confidence", choices=["low", "medium", "high"], default="medium", help="minimum scanner confidence to apply")
     direct.add_argument("--source-kind", default="", help="comma-separated source_kind filter")
@@ -3684,6 +4649,20 @@ def build_parser() -> argparse.ArgumentParser:
     direct.add_argument("--allow-no-changes", action="store_true", help="return success even when no units changed")
     direct.add_argument("--force", action="store_true", help="replace an existing output copy")
     direct.set_defaults(func=apply_direct_nbt_strings)
+
+    direct_text = subparsers.add_parser("apply-direct-text", help="patch copied Java world embedded-direct text anchors")
+    direct_text.add_argument("source", help="original Java world directory or map zip")
+    direct_text.add_argument("--translations", required=True, help="translation_units.jsonl or translations.jsonl containing embedded-direct units")
+    direct_text.add_argument("--out", required=True, help="copied world output directory or .zip")
+    direct_text.add_argument("--min-confidence", choices=["low", "medium", "high"], default="medium", help="minimum scanner confidence to apply")
+    direct_text.add_argument("--source-kind", default="", help="comma-separated source_kind filter")
+    direct_text.add_argument("--unit-id", default="", help="comma-separated unit id filter")
+    direct_text.add_argument("--allow-empty-translation", action="store_true", help="allow empty translations to replace source strings")
+    direct_text.add_argument("--dry-run", action="store_true", help="copy to a temporary directory and report what would change")
+    direct_text.add_argument("--report", default="", help="custom apply report JSON path")
+    direct_text.add_argument("--allow-no-changes", action="store_true", help="return success even when no units changed")
+    direct_text.add_argument("--force", action="store_true", help="replace an existing output copy")
+    direct_text.set_defaults(func=apply_direct_nbt_strings)
 
     audit = subparsers.add_parser("audit-english", help="audit exported Java map/resource files for residual English-looking player-facing text")
     audit.add_argument("source", help="Java world directory or map zip to audit")

@@ -14,8 +14,8 @@ Use this reference before apply or export.
 - Ensure exported zip roots are correct: `pack.mcmeta` must be at the resource-pack root.
 - For copied worlds with embedded packs, ensure `resources.zip` is in the same directory as the copied world's `level.dat`; for map zips with a top-level containing folder, the correct path is usually `<folder>/resources.zip`, not archive-root `resources.zip`.
 - After `apply-hybrid-keys`, inspect `mcmap_hybrid_apply_report.json` and rescan the copied world or copied zip when practical.
-- After `apply-direct-nbt-strings`, inspect `mcmap_direct_nbt_apply_report.json` and rescan the copied world or copied zip when practical.
-- After export/apply, run `audit-english` on the copied world or copied zip when the target language is not English and the map has hardcoded text. Treat findings in `Command`, sign `messages`, `CustomName`, display/lore, and book/page paths as high-priority QA leads.
+- After `apply-direct-text` or legacy `apply-direct-nbt-strings`, inspect `mcmap_direct_text_apply_report.json` and rescan the copied world or copied zip when practical.
+- After export/apply, run `audit-english` on the copied world or copied zip when the target language is not English and the map has hardcoded text. Treat findings in `.mcfunction`, command `Command`, datapack JSON storage/dialogue paths, sign `messages`, `CustomName`, display/lore, and book/page paths as high-priority QA leads.
 
 ## Translation QA
 
@@ -46,6 +46,7 @@ Report counts by:
 - Excluded `LastOutput` count and whether `--include-last-output` was intentionally used.
 - Aggregated sign groups and segment coverage.
 - Residual-English audit findings after export/apply.
+- Datapack function call graph coverage and suspicious text hints reviewed.
 - Player-facing units intentionally left untranslated, with concrete reasons.
 - Files reported as pending binary parser coverage.
 - Resource-pack visual text asset hints, especially PNG textures and font provider JSON that language JSON cannot cover.
@@ -63,7 +64,7 @@ For any world patch, report:
 - Known unhandled source kinds.
 - Commands or text components that could not be safely transformed.
 - `segment_count_mismatch`, `segment_source_text_mismatch`, `existing_translate_conflict`, `multiple_text_nodes`, and other skip reasons from the hybrid apply report.
-- `sign_segment_source_text_mismatch`, `sign_line_nbt_path_missing`, `source_text_mismatch`, `translation_too_long_for_nbt_string`, `missing_region_chunk_anchor`, and other skip reasons from apply reports.
+- `sign_segment_source_text_mismatch`, `sign_line_nbt_path_missing`, `source_text_mismatch`, `translation_too_long_for_nbt_string`, `missing_direct_command_span`, `command_json_path_missing`, `json_string_path_missing`, `missing_region_chunk_anchor`, and other skip reasons from apply reports.
 
 ## Workpack QA
 

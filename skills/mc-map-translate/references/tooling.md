@@ -30,10 +30,11 @@ The bundled tools do not call external translation services and do not translate
 `scripts/mcmap_java_tools.py`:
 
 - `inspect`: detect Java map/package markers and Bedrock-only markers.
-- `scan`: scan Java resource-pack language JSON, datapack JSON text components, `.mcfunction` JSON text components, command/NBT JSON spans, quoted command/SNBT JSON text components, aggregated sign faces, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Pass `--project-layout` to also create the indexed multi-file layout. `LastOutput` is excluded by default; pass `--include-last-output` only when intentionally auditing command logs. NBT strings are decoded as strict UTF-8; invalid bytes are reported instead of converted to replacement characters. `scan_report.json` includes visual text asset hints for PNG/font/model resources and a `full_localization_recommendation` prompt.
+- `scan`: scan Java resource-pack language JSON, all datapack JSON text components, datapack JSON strings containing text components, `.mcfunction` JSON text components, `execute ... run ...` command chains, command JSON plain strings, quoted command/SNBT JSON text components, plain command messages, storage value strings, aggregated sign faces, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Pass `--project-layout` to also create the indexed multi-file layout. `LastOutput` is excluded by default; pass `--include-last-output` only when intentionally auditing command logs. NBT strings are decoded as strict UTF-8; invalid bytes are reported instead of converted to replacement characters. `scan_report.json` includes function call graph context, suspicious text hints, visual text asset hints for PNG/font/model resources, and a `full_localization_recommendation` prompt.
 - `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy. Blocks selected rows that contain Unicode replacement characters. When `--resource-pack` is used, embeds `resources.zip` beside the copied world's `level.dat`, including packages whose zip root is a containing folder.
-- `apply-direct-nbt-strings`: copy/extract a Java world or map zip and directly replace translated plain NBT strings in `.dat` and `.mca` files when exact anchors match. For command-contained plain SNBT strings, patches only the recorded quoted `command_string_span`. Blocks selected rows that contain Unicode replacement characters.
-- `audit-english`: rescan an exported copied world or map zip for English-looking residual text in player-facing-ish command, sign, text, CustomName, display/lore, and book/page paths. It writes JSON plus a Markdown review and reports visual asset hints; it skips pure `translate` keys by default.
+- `apply-direct-text`: copy/extract a Java world or map zip and directly replace translated `embedded-direct` anchors in `.mcfunction`, datapack JSON, `.dat`, and `.mca` files when exact anchors match. It handles `command_plain_span`, plain `command_string_span`, `command_json_path`, datapack JSON `json_string_path`, and parsed NBT strings. Blocks selected rows that contain Unicode replacement characters.
+- `apply-direct-nbt-strings`: legacy alias for `apply-direct-text`.
+- `audit-english`: rescan an exported copied world or map zip for English-looking residual text in player-facing-ish `.mcfunction`, datapack JSON, command, sign, text, CustomName, display/lore, and book/page paths. It writes JSON plus a Markdown review and reports visual asset hints; it skips pure `translate` keys and protected tokens by default.
 - `zip-resource-pack`: zip a resource pack directory with the correct root.
 - `embed-resource-pack`: copy a Java world and add `resources.zip` to the copy.
 
@@ -101,13 +102,14 @@ Then patch a copied world or copied map zip:
 ```bash
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys <world-or-zip> --translations <workdir> --out <workdir>/exports/world-keyed --resource-pack <workdir>/exports/hybrid-resource-pack
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys <world-or-zip> --translations <workdir> --out <workdir>/exports/world-keyed.zip
-python skills/mc-map-translate/scripts/mcmap_java_tools.py audit-english <workdir>/exports/world-keyed.zip --out <workdir>/qa/residual_english_audit.json
+python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-direct-text <workdir>/exports/world-keyed.zip --translations <workdir> --out <workdir>/exports/world-full-direct.zip --min-confidence low
+python skills/mc-map-translate/scripts/mcmap_java_tools.py audit-english <workdir>/exports/world-full-direct.zip --out <workdir>/qa/residual_english_audit.json
 ```
 
-For translated plain NBT strings that cannot be key-injected:
+For translated direct text that cannot be key-injected:
 
 ```bash
-python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-direct-nbt-strings <world-or-zip> --translations <workdir> --out <workdir>/exports/world-direct-nbt.zip
+python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-direct-text <world-or-zip> --translations <workdir> --out <workdir>/exports/world-direct-text.zip --min-confidence low
 ```
 
 To ship a copied world with the pack embedded:
@@ -127,6 +129,7 @@ Supported automatic patches:
 - `.mcfunction` JSON command spans from `function_line` and `command_span`.
 - Quoted JSON text components inside commands/SNBT from exact `command_string_span` anchors.
 - Datapack JSON text components from `json_path`.
+- JSON text components stored as strings inside datapack JSON from `json_string_path`.
 - Gzip/plain `.dat` NBT strings containing JSON text components or commands with JSON spans.
 - Aggregated sign faces whose `segments[]` include per-line `nbt_path` and `component_json_path`.
 - Standard gzip, zlib, or raw `.mca` chunk NBT strings with exact chunk and NBT path anchors.
@@ -142,18 +145,19 @@ Safety limits:
 
 Use `--multi-text-mode skip` only when you want the old conservative behavior for audit or comparison.
 
-## Apply-Direct-NBT-Strings Behavior
+## Apply-Direct-Text Behavior
 
-`apply-direct-nbt-strings` never edits the source path. It selects only Java units with `embedded-direct`, an `address.nbt_path`, no `json_path`, a supported `.dat` or `.mca` source file, and a filled `translation` unless `--allow-empty-translation` is passed.
+`apply-direct-text` never edits the source path. It selects only Java units with `embedded-direct`, no decoded-component `json_path`, a supported direct anchor, and a filled `translation` unless `--allow-empty-translation` is passed.
 
 Safety limits:
 
-- Every target NBT string must still exactly equal the unit `raw`; otherwise it is skipped.
-- For command-contained plain SNBT strings, only the quoted `command_string_span` must match `raw`; the surrounding command is preserved.
-- `.mca` rows must include a chunk `local_index` anchor.
-- Translations longer than the Java NBT string limit are skipped.
-- JSON text components and command JSON spans are skipped here; use `apply-hybrid-keys` for those.
-- The command writes `mcmap_direct_nbt_apply_report.json` or a sidecar report for zip output.
+- Every target string must still exactly equal the unit `raw`; otherwise it is skipped.
+- For `.mcfunction` rows, direct apply patches only `command_plain_span`, plain `command_string_span`, or the string at `command_json_path` inside the recorded command JSON span.
+- For datapack JSON rows, direct apply patches only the exact `json_string_path` value.
+- For NBT rows, direct apply patches exact `nbt_path` values, or exact command-contained spans inside that NBT string. `.mca` rows must include a chunk `local_index` anchor.
+- Translations that would exceed the Java NBT string limit are skipped for NBT-backed anchors.
+- JSON text components are skipped here; use `apply-hybrid-keys` for those.
+- The command writes `mcmap_direct_text_apply_report.json` or a sidecar report for zip output. `apply-direct-nbt-strings` remains as a legacy alias.
 
 ## Coverage Limits
 

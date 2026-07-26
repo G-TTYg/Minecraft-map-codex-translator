@@ -29,9 +29,9 @@ Use JSON Lines (`.jsonl`). Each non-empty line is one text unit.
 
 - `id`: Stable within the project. Prefer deterministic IDs from anchor plus raw text, not array index.
 - `edition`: Always `java` in this plugin.
-- `source_kind`: Common values include `lang`, `function`, `datapack_json`, `text_component_translate`, `command_block`, `sign`, `book`, `bossbar`, `scoreboard`, `entity_name`, `item_name`, `item_lore`, `advancement`, `title`, `actionbar`, `tellraw`, `text_display`, `nbt_text`, and `unknown`.
+- `source_kind`: Common values include `lang`, `function`, `datapack_json`, `storage_text`, `say`, `text_component_translate`, `command_block`, `sign`, `book`, `bossbar`, `scoreboard`, `entity_name`, `item_name`, `item_lore`, `advancement`, `title`, `actionbar`, `tellraw`, `text_display`, `nbt_text`, and `unknown`.
 - `source_file`: Path relative to the map/package root when possible.
-- `address`: Structured anchor. Include `block_pos`, `entity_uuid`, `chunk`, `nbt_path`, `json_path`, `function_line`, `command_span`, `command_string_span`, `sign_lines`, or `lang_key` as applicable.
+- `address`: Structured anchor. Include `block_pos`, `entity_uuid`, `chunk`, `nbt_path`, `json_path`, `json_string_path`, `function_id`, `function_line`, `function_macro`, `command_span`, `command_json_path`, `command_string_span`, `command_plain_span`, `sign_lines`, or `lang_key` as applicable.
 - `raw`: Exact source string or exact player-facing segment.
 - `translation`: Target language translation.
 - `translation_key`: Language key used or proposed for resource-pack export.
@@ -117,11 +117,15 @@ For `.dat` and `.mca` sources, `address` may include:
 
 These anchors are sufficient for QA and copied-world apply tooling.
 
-For JSON text component strings in `.dat` or `.mca`, `apply-hybrid-keys` can use `nbt_path`, optional `chunk`, `json_path`, and optional `command_span` to patch the copied NBT data. Plain NBT strings without `json_path` are not hybrid key-injection targets; `apply-direct-nbt-strings` can replace them directly in a copied world when the current NBT string still exactly equals `raw` and `translation` is filled.
+For JSON text component strings in `.dat` or `.mca`, `apply-hybrid-keys` can use `nbt_path`, optional `chunk`, `json_path`, and optional `command_span` to patch the copied NBT data. Plain NBT strings without `json_path` are not hybrid key-injection targets; `apply-direct-text` can replace them directly in a copied world when the current NBT string still exactly equals `raw` and `translation` is filled.
 
 For quoted JSON text components inside command/SNBT strings, `address.command_string_span` stores the exact quoted string span. `apply-hybrid-keys` decodes the quoted JSON string, injects the generated key, and writes the string back with the original quote style.
 
-For plain SNBT strings inside command strings, `address.command_string_span` plus `address.nbt_path` allow `apply-direct-nbt-strings` to replace only that quoted value when the decoded string still exactly equals `raw`.
+For JSON text components stored as strings inside datapack JSON, `address.json_string_path` points to the outer JSON string value, while `address.json_path` and `context.text_nodes[]` refer to the decoded component inside that string.
+
+For plain `.mcfunction` messages, `address.command_plain_span` stores the exact unquoted message span. For plain JSON strings inside command JSON spans, `address.command_span` stores the JSON object/array span and `address.command_json_path` stores the string path inside that decoded JSON. For plain SNBT/storage strings inside command strings, `address.command_string_span` stores the exact quoted value. `apply-direct-text` can replace these direct anchors when the current source text still exactly equals `raw`.
+
+For datapack function context, `address.function_id`, `address.function_line`, and optional `address.function_macro` identify the function and macro line status. `scan_report.json` may also include `function_call_graph` and `suspicious_text_hints`; use them for context loading and QA, not as translation rows.
 
 ## Translation JSONL
 
