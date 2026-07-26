@@ -32,6 +32,7 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - `hybrid-keyed-copy`: copied world/map patched so supported hardcoded JSON text components use generated `translate` keys, with a matching resource pack embedded or shipped separately.
    - `direct-text-copy`: copied world/map with direct literal replacements for supported plain command/SNBT/datapack JSON/NBT strings; it may be produced on top of hybrid key injection when both source kinds exist, is higher risk, and requires explicit confirmation.
    - Define "full translation" to the user as a coverage goal resolved to one of these four modes after scan: use `hybrid-keyed-copy` for the safest complete mode when hardcoded JSON text exists; use `direct-text-copy` for maximum coverage only when direct-only text remains and the user accepts the risk.
+   - If the source map already contains `resources.zip`, treat it as the base resource pack. Embedded outputs must merge generated language files into the copied existing pack by default, not replace it.
 
 3. Load the minimum required references.
    - For Java export modes, read `references/java-resource-pack-first.md`.
@@ -58,6 +59,7 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
    - Treat modern datapacks as a priority source. Expect text in `.mcfunction`, `execute ... run ...` chains, macro function lines, storage JSON/SNBT, loot tables, item modifiers, advancements, predicates, and custom JSON under `datapacks/*/data/**`.
    - Use scanner-reported `function_call_graph` and `suspicious_text_hints` to recover dialogue order and review likely player-facing storage/macro/custom JSON strings that were not safely promoted to normal apply units.
    - After the first scan, summarize coverage by export mode and ask which of the four modes to produce. When `full_localization_recommendation.suggest_full_translation_mode` is true, recommend `hybrid-keyed-copy` as the safest complete mode for hardcoded JSON text, or ask whether to upgrade to `direct-text-copy` when direct-only text remains and the user wants maximum coverage.
+   - If `scan_report.json` lists `map_resource_packs`, preserve those packs as the base layer for embedded outputs and mention that a standalone translation pack may be only an overlay unless merged with the original map pack.
    - Preserve command syntax, selectors, score names, NBT paths, JSON text component structure, colors, click events, hover events, newlines, and placeholders.
 
 3. Build context before translating.
@@ -80,8 +82,8 @@ The default output is non-invasive `resource-pack` mode. Use `hybrid-key-injecti
 
 5. Export safely.
    - `resource-pack-only`: generate language/resource files, zip the pack, and produce a QA report.
-   - `embedded-pack-copy`: copy the world/map and embed the generated pack as `resources.zip` beside `level.dat`.
-   - `hybrid-keyed-copy`: first build a resource pack with `--include-hybrid-keys`, then run `apply-hybrid-keys` to patch a copied map so supported hardcoded JSON text components use generated `translate` keys. This is the default "full translation" core when hardcoded JSON text exists.
+   - `embedded-pack-copy`: copy the world/map and embed the generated pack as `resources.zip` beside `level.dat`; if the copied world already has `resources.zip`, merge the generated pack into it.
+   - `hybrid-keyed-copy`: first build a resource pack with `--include-hybrid-keys`, then run `apply-hybrid-keys` to patch a copied map so supported hardcoded JSON text components use generated `translate` keys. This is the default "full translation" core when hardcoded JSON text exists. If `--resource-pack` is embedded and the copied world already has `resources.zip`, merge instead of replacing.
    - `direct-text-copy`: run `apply-direct-text` only after explicit user confirmation; patch only exact anchors in the copy, validate every changed file, and report each anchor changed. Use it for translated plain command, SNBT, datapack JSON, or NBT strings that are not JSON text components.
    - For "maximum coverage", chain `hybrid-keyed-copy` first and then `direct-text-copy` on that copied output when direct-only units remain and the user accepts the risk.
 
@@ -126,6 +128,7 @@ python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys pat
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-direct-text path/to/world.zip --translations work/mymap --out work/mymap/exports/world-direct-text.zip --min-confidence low
 python skills/mc-map-translate/scripts/mcmap_java_tools.py audit-english path/to/exported-world-or.zip --out work/mymap/qa/residual_english_audit.json
 python skills/mc-map-translate/scripts/mcmap_java_tools.py zip-resource-pack work/mymap/exports/resource-pack --out work/mymap/exports/mymap-ja_jp-resourcepack.zip
+python skills/mc-map-translate/scripts/mcmap_java_tools.py zip-resource-pack work/mymap/exports/resource-pack --base-resource-pack path/to/existing/resources.zip --out work/mymap/exports/mymap-ja_jp-merged-resourcepack.zip
 python skills/mc-map-translate/scripts/mcmap_java_tools.py embed-resource-pack path/to/world --resource-pack work/mymap/exports/resource-pack --out work/mymap/exports/world-with-resources
 ```
 
@@ -146,6 +149,7 @@ For staged AI translation, treat `index/manifest.json` as the entry point. Load 
 - Do not remove formatting, click events, hover events, insertion text, fonts, or keybind references.
 - Do not casually rewrite backslash escapes such as `\n`, `\t`, `\"`, `\\`, or `\uXXXX`; they may belong to JSON, SNBT, command syntax, or Minecraft rendering rather than prose.
 - Do not claim resource-pack-only coverage for hardcoded text unless the map already uses translation keys or the output mode includes key injection.
+- Do not replace a map's existing `resources.zip` with a translation-only pack unless the user explicitly asks for replacement; merge generated language files into the copied existing pack by default.
 - Do not translate a real map without maintaining `translation_progress.md` or an equivalent user-approved persistent progress TODO.
 - Do not apply or export translations that show mojibake, replacement characters, or `?` in place of target-language characters; re-read and repair the UTF-8 source artifact first.
 - Ask for explicit confirmation before `embedded-direct` output.

@@ -108,8 +108,8 @@ The plugin distinguishes internal unit support from user-facing export modes. Th
 | Mode | Changes world data? | Main output | Best for | Limits |
 | --- | --- | --- | --- | --- |
 | `resource-pack-only` | No | Standalone resource-pack zip | Existing language keys and resource-pack-localizable text | Cannot cover hardcoded command/sign/book/entity/NBT text |
-| `embedded-pack-copy` | Copy only | Copied map/world with `resources.zip` beside `level.dat` | Shipping a map where players should not install a separate pack manually | Same text coverage as `resource-pack-only` |
-| `hybrid-keyed-copy` | Copied map patched | Copied map/world plus matching resource pack or embedded `resources.zip` | Hardcoded JSON text components that can become `{"translate":"<key>"}` | Does not cover direct-only plain strings or image/font text |
+| `embedded-pack-copy` | Copy only | Copied map/world with `resources.zip` beside `level.dat` | Shipping a map where players should not install a separate pack manually. Existing `resources.zip` is merged, not replaced. | Same text coverage as `resource-pack-only` |
+| `hybrid-keyed-copy` | Copied map patched | Copied map/world plus matching resource pack or embedded `resources.zip` | Hardcoded JSON text components that can become `{"translate":"<key>"}`. Existing `resources.zip` is merged when embedded. | Does not cover direct-only plain strings or image/font text |
 | `direct-text-copy` | Copied map patched | Copied map/world with direct literal replacements | Plain command/SNBT/datapack JSON/NBT strings that cannot be key-injected | Higher risk; requires explicit user confirmation |
 
 ## What "Full Translation" Means
@@ -126,6 +126,14 @@ Typical choice:
 Each mode can naturally produce several files, such as a map zip, a resource-pack zip, apply reports, and QA audits. Those files are the artifacts of the selected mode, not separate modes.
 
 Resource-pack-only output is truly complete only when all player-facing text is already reachable through language/resource keys and no hardcoded, direct-only, or visual-image text remains.
+
+## Existing Map Resource Packs
+
+Many Java maps already contain `resources.zip`. The plugin treats that file as the original map resource pack.
+
+When exporting a copied map with embedded resources, the generated translation pack is merged into the copied existing `resources.zip` by default. This preserves textures, sounds, fonts, models, custom item assets, visual UI assets, and the original `pack.mcmeta` from the original map.
+
+Do not replace an existing `resources.zip` with a translation-only pack unless you intentionally want to discard the original map pack. For standalone exports, `resource-pack-only` can be a small overlay pack, but a merged full pack is better when players should not manage both the original map pack and a translation overlay.
 
 ## Common Commands
 
@@ -156,6 +164,7 @@ Build a standalone resource pack:
 ```bash
 python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack work/map --out work/map/exports/resource-pack --pack-format 34 --target zh_cn
 python skills/mc-map-translate/scripts/mcmap_java_tools.py zip-resource-pack work/map/exports/resource-pack --out work/map/exports/map-zh_cn-resourcepack.zip
+python skills/mc-map-translate/scripts/mcmap_java_tools.py zip-resource-pack work/map/exports/resource-pack --base-resource-pack path/to/original/resources.zip --out work/map/exports/map-zh_cn-merged-resourcepack.zip
 ```
 
 Build a hybrid-keyed copied map:

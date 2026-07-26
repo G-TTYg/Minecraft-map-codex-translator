@@ -2381,6 +2381,8 @@ def full_localization_recommendation(report: dict[str, Any]) -> dict[str, Any]:
         reasons.append("some datapack macro/storage/JSON strings look player-facing but need confirmation before safe apply")
     if report.get("pending_binary_parser_coverage"):
         reasons.append("some binary files were pending or failed parser coverage")
+    if report.get("map_resource_pack_count", 0):
+        reasons.append("the map already includes resources.zip; embedded exports must merge generated language files into the existing pack instead of replacing it")
     return {
         "ask_user_after_scan": True,
         "suggest_full_translation_mode": bool(reasons),
@@ -2398,7 +2400,7 @@ def full_localization_recommendation(report: dict[str, Any]) -> dict[str, Any]:
                 "name": "embedded-pack-copy",
                 "world_data_changed": "copy-only",
                 "confirmation_required": False,
-                "output": "copied map/world with resources.zip beside level.dat",
+                "output": "copied map/world with resources.zip beside level.dat, merged with existing resources.zip when present",
                 "covers": "same text as resource-pack-only, with easier distribution to players",
                 "limits": "does not cover hardcoded text unless it already uses translate keys",
             },
@@ -2406,7 +2408,7 @@ def full_localization_recommendation(report: dict[str, Any]) -> dict[str, Any]:
                 "name": "hybrid-keyed-copy",
                 "world_data_changed": "copied map patched",
                 "confirmation_required": False,
-                "output": "copied map/world zip plus matching resource pack or embedded resources.zip",
+                "output": "copied map/world zip plus matching resource pack or embedded resources.zip, merged with existing resources.zip when present",
                 "covers": "resource-pack units plus supported hardcoded JSON text components converted to translate keys",
                 "limits": "does not cover direct-only plain strings or visual image/font text",
                 "recommended_when": "hardcoded JSON text exists" if has_hybrid else "not required by current scan unless future QA finds hardcoded JSON text",
@@ -2431,11 +2433,12 @@ def full_localization_recommendation(report: dict[str, Any]) -> dict[str, Any]:
                 "direct-text-copy as the maximum-coverage mode when direct-only plain command/SNBT/datapack JSON/NBT strings remain and the user explicitly accepts the risk",
             ],
             "artifact_note": "A selected mode can emit several artifacts such as a map zip, resource-pack zip, resources.zip, apply reports, residual-English audit, and visual asset findings; these artifacts are not additional modes.",
+            "existing_resource_pack_rule": "when the source map already includes resources.zip, embedded-pack-copy and hybrid-keyed-copy must merge generated translation files into that pack by default; replacing it would drop original textures, sounds, fonts, models, or custom assets",
             "resource_pack_only_is_full_only_when": "all player-facing text is already reachable through language/resource keys and no hardcoded/direct-only/visual text remains",
         },
         "common_output_artifacts": [
             "standalone resource-pack zip",
-            "copied map with resources.zip",
+            "copied map with resources.zip, merged with the original map resource pack when one exists",
             "hybrid-keyed copied map zip when hardcoded text is translated",
             "QA/apply reports",
         ],
@@ -2462,6 +2465,7 @@ def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, A
         f"- Macro function lines: {report.get('discovery_counters', {}).get('macro_function_lines', 0)}",
         f"- Function calls: {report.get('function_call_count', 0)}",
         f"- Suspicious text hints: {report.get('suspicious_text_hint_count', 0)}",
+        f"- Map resources.zip files: {report.get('map_resource_pack_count', 0)}",
         "",
         "## Counts By Kind",
         "",
@@ -2501,6 +2505,13 @@ def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, A
             lines.append(
                 f"- `{hint.get('kind', '')}` `{hint.get('source_file', '')}` {location}: `{hint.get('raw_preview', '')}`"
             )
+    if report.get("map_resource_packs"):
+        lines.extend(["", "## Existing Map Resource Packs", ""])
+        lines.append(
+            "The source map already contains resources.zip. Embedded exports must merge generated language files into the copied pack instead of replacing it, or original textures/sounds/fonts/models may be lost."
+        )
+        for pack in report["map_resource_packs"][:20]:
+            lines.append(f"- `{pack.get('path', '')}` ({pack.get('size', 0)} bytes)")
     visual = report.get("visual_text_asset_hints", {})
     if visual.get("total", 0):
         lines.extend(["", "## Resource-Pack Visual Text Hints", ""])
@@ -2533,6 +2544,9 @@ def write_scan_review(path: Path, report: dict[str, Any], rows: list[dict[str, A
             artifact_note = full_definition.get("artifact_note")
             if artifact_note:
                 lines.append(f"Artifact note: {artifact_note}")
+            existing_pack_rule = full_definition.get("existing_resource_pack_rule")
+            if existing_pack_rule:
+                lines.append(f"Existing resource-pack rule: {existing_pack_rule}.")
             condition = full_definition.get("resource_pack_only_is_full_only_when")
             if condition:
                 lines.append(f"Resource-pack-only is complete only when {condition}.")
@@ -2569,12 +2583,15 @@ def scan_source(args: argparse.Namespace) -> int:
     discovery_counters: Counter[str] = Counter()
     visual_counts: Counter[str] = Counter()
     visual_samples: list[dict[str, str]] = []
+    map_resource_packs: list[dict[str, Any]] = []
     suspicious_text_hints: list[dict[str, Any]] = []
     function_calls: list[dict[str, Any]] = []
 
     for entry in iter_entries(source):
         scanned_files += 1
         lowered = entry.path.lower()
+        if "!" not in entry.path and PurePosixPath(entry.path).name.lower() == "resources.zip":
+            map_resource_packs.append({"path": entry.path, "size": entry.size})
         visual_kind = visual_text_asset_kind(entry.path)
         if visual_kind:
             visual_counts[visual_kind] += 1
@@ -2666,6 +2683,8 @@ def scan_source(args: argparse.Namespace) -> int:
         "suspicious_text_hint_count": len(suspicious_text_hints),
         "function_call_graph": function_calls[:1000],
         "function_call_count": len(function_calls),
+        "map_resource_packs": map_resource_packs,
+        "map_resource_pack_count": len(map_resource_packs),
         "direct_only_unit_count": sum(
             1
             for row in units
@@ -4369,6 +4388,81 @@ def zip_any_dir(src: Path, out: Path) -> None:
             archive.write(path, path.relative_to(src).as_posix())
 
 
+def resource_pack_file_entries(src: Path) -> list[tuple[Path, str]]:
+    if not (src / "pack.mcmeta").exists():
+        raise ValueError(f"resource pack root is missing pack.mcmeta: {src}")
+    return [(path, path.relative_to(src).as_posix()) for path in sorted(p for p in src.rglob("*") if p.is_file())]
+
+
+def zip_resource_pack_dir(
+    src: Path,
+    out: Path,
+    *,
+    base_zip: Path | None = None,
+    replace_existing_resource_pack: bool = False,
+) -> dict[str, Any]:
+    overlay_entries = resource_pack_file_entries(src)
+    overlay_names = {rel for _, rel in overlay_entries}
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    base_data: bytes | None = None
+    if base_zip and base_zip.exists() and not replace_existing_resource_pack:
+        base_data = base_zip.read_bytes()
+
+    report = {
+        "mode": "replace" if replace_existing_resource_pack else "merge" if base_data is not None else "create",
+        "base_resource_pack": str(base_zip) if base_data is not None and base_zip else "",
+        "output": str(out),
+        "base_entry_count": 0,
+        "overlay_entry_count": len(overlay_entries),
+        "overwritten_entry_count": 0,
+        "duplicate_base_entry_count": 0,
+        "preserved_base_pack_mcmeta": False,
+    }
+
+    tmp = out.with_name(f"{out.name}.tmp")
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as archive:
+            written: set[str] = set()
+            if base_data is not None:
+                try:
+                    with zipfile.ZipFile(io.BytesIO(base_data)) as base_archive:
+                        for info in sorted(base_archive.infolist(), key=lambda item: item.filename):
+                            if info.is_dir():
+                                continue
+                            rel = to_posix(info.filename)
+                            if rel in written:
+                                report["duplicate_base_entry_count"] += 1
+                                continue
+                            if rel == "pack.mcmeta":
+                                archive.writestr(rel, base_archive.read(info))
+                                written.add(rel)
+                                report["base_entry_count"] += 1
+                                report["preserved_base_pack_mcmeta"] = True
+                                continue
+                            if rel in overlay_names:
+                                report["overwritten_entry_count"] += 1
+                                continue
+                            archive.writestr(rel, base_archive.read(info))
+                            written.add(rel)
+                            report["base_entry_count"] += 1
+                except zipfile.BadZipFile as exc:
+                    raise ValueError(
+                        f"existing resource pack is not a valid zip and will not be overwritten implicitly: {base_zip}; "
+                        "repair it or pass --replace-existing-resource-pack"
+                    ) from exc
+            for path, rel in overlay_entries:
+                if rel in written:
+                    continue
+                archive.write(path, rel)
+        tmp.replace(out)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+    return report
+
+
 def find_world_root_for_resources(root: Path) -> Path:
     """Return the Java world root inside a copied package tree."""
     if (root / "level.dat").is_file():
@@ -4494,9 +4588,10 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
         report_path = default_apply_report_path(out, is_zip_output)
 
     resource_pack_embed_path = ""
+    resource_pack_merge_report: dict[str, Any] = {}
 
     def run_on_copy(workdir: Path) -> None:
-        nonlocal resource_pack_embed_path
+        nonlocal resource_pack_embed_path, resource_pack_merge_report
         copy_source_to_workdir(source, workdir)
         patch_world_copy(workdir, rows, state)
         if args.resource_pack:
@@ -4504,7 +4599,12 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
             if not state.dry_run:
                 resource_root = find_world_root_for_resources(workdir)
                 target = resource_root / "resources.zip"
-                zip_dir(pack, target)
+                resource_pack_merge_report = zip_dir(
+                    pack,
+                    target,
+                    base_zip=target if target.exists() else None,
+                    replace_existing_resource_pack=args.replace_existing_resource_pack,
+                )
                 resource_pack_embed_path = target.relative_to(workdir).as_posix()
 
     if args.dry_run:
@@ -4541,6 +4641,7 @@ def apply_hybrid_keys(args: argparse.Namespace) -> int:
         "skipped_samples": state.skipped_samples,
         "resource_pack_embedded": bool(args.resource_pack and not args.dry_run),
         "resource_pack_embed_path": resource_pack_embed_path,
+        "resource_pack_merge": resource_pack_merge_report,
     }
     write_json(report_path, report)
 
@@ -4634,20 +4735,31 @@ def apply_direct_nbt_strings(args: argparse.Namespace) -> int:
     return 0 if state.changed_units or args.allow_no_changes else 3
 
 
-def zip_dir(src: Path, out: Path) -> None:
-    if not (src / "pack.mcmeta").exists():
-        raise ValueError(f"resource pack root is missing pack.mcmeta: {src}")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted(p for p in src.rglob("*") if p.is_file()):
-            archive.write(path, path.relative_to(src).as_posix())
+def zip_dir(
+    src: Path,
+    out: Path,
+    *,
+    base_zip: Path | None = None,
+    replace_existing_resource_pack: bool = False,
+) -> dict[str, Any]:
+    return zip_resource_pack_dir(
+        src,
+        out,
+        base_zip=base_zip,
+        replace_existing_resource_pack=replace_existing_resource_pack,
+    )
 
 
 def zip_resource_pack(args: argparse.Namespace) -> int:
     src = Path(args.resource_pack).resolve()
     out = Path(args.out).resolve()
-    zip_dir(src, out)
+    base = Path(args.base_resource_pack).resolve() if args.base_resource_pack else None
+    merge_report = zip_dir(src, out, base_zip=base)
     print(f"zip: {out}")
+    print(f"resource_pack_zip_mode: {merge_report['mode']}")
+    if merge_report.get("base_resource_pack"):
+        print(f"base_resource_pack: {merge_report['base_resource_pack']}")
+        print(f"overwritten_entries: {merge_report['overwritten_entry_count']}")
     return 0
 
 
@@ -4677,9 +4789,19 @@ def embed_resource_pack(args: argparse.Namespace) -> int:
 
     shutil.copytree(world, out)
     resource_root = find_world_root_for_resources(out)
-    zip_dir(pack, resource_root / "resources.zip")
+    target = resource_root / "resources.zip"
+    merge_report = zip_dir(
+        pack,
+        target,
+        base_zip=target if target.exists() else None,
+        replace_existing_resource_pack=args.replace_existing_resource_pack,
+    )
     print(f"copied_world: {out}")
-    print(f"embedded_resource_pack: {resource_root / 'resources.zip'}")
+    print(f"embedded_resource_pack: {target}")
+    print(f"resource_pack_zip_mode: {merge_report['mode']}")
+    if merge_report.get("base_resource_pack"):
+        print(f"base_resource_pack: {merge_report['base_resource_pack']}")
+        print(f"overwritten_entries: {merge_report['overwritten_entry_count']}")
     return 0
 
 
@@ -4726,6 +4848,11 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--report", default="", help="custom apply report JSON path")
     apply.add_argument("--allow-no-changes", action="store_true", help="return success even when no units changed")
     apply.add_argument("--force", action="store_true", help="replace an existing output copy")
+    apply.add_argument(
+        "--replace-existing-resource-pack",
+        action="store_true",
+        help="when embedding --resource-pack, replace an existing copied resources.zip instead of merging the generated pack into it",
+    )
     apply.set_defaults(func=apply_hybrid_keys)
 
     direct = subparsers.add_parser(
@@ -4769,13 +4896,19 @@ def build_parser() -> argparse.ArgumentParser:
     zip_pack = subparsers.add_parser("zip-resource-pack", help="zip a resource-pack directory")
     zip_pack.add_argument("resource_pack", help="resource pack directory with pack.mcmeta at root")
     zip_pack.add_argument("--out", required=True, help="output zip path")
+    zip_pack.add_argument("--base-resource-pack", default="", help="optional existing resource-pack zip to merge before overlaying generated files")
     zip_pack.set_defaults(func=zip_resource_pack)
 
-    embed = subparsers.add_parser("embed-resource-pack", help="copy a Java world and add resources.zip")
+    embed = subparsers.add_parser("embed-resource-pack", help="copy a Java world and add or merge resources.zip")
     embed.add_argument("world", help="original Java world directory")
     embed.add_argument("--resource-pack", required=True, help="resource pack directory")
     embed.add_argument("--out", required=True, help="copied world output directory")
     embed.add_argument("--force", action="store_true", help="replace existing output directory")
+    embed.add_argument(
+        "--replace-existing-resource-pack",
+        action="store_true",
+        help="replace an existing copied resources.zip instead of merging the generated pack into it",
+    )
     embed.set_defaults(func=embed_resource_pack)
 
     return parser

@@ -14,6 +14,7 @@ Use this reference before apply or export.
 - For patched worlds, validate each changed NBT/SNBT/JSON file with the appropriate parser.
 - Ensure exported zip roots are correct: `pack.mcmeta` must be at the resource-pack root.
 - For copied worlds with embedded packs, ensure `resources.zip` is in the same directory as the copied world's `level.dat`; for map zips with a top-level containing folder, the correct path is usually `<folder>/resources.zip`, not archive-root `resources.zip`.
+- If the source map already had `resources.zip`, verify embedded exports merged into the copied existing pack rather than replacing it. Confirm original non-language assets such as textures, sounds, fonts, models, and custom item assets still exist in the exported `resources.zip`, and that the original `pack.mcmeta` was preserved unless replacement was intentional.
 - After `apply-hybrid-keys`, inspect `mcmap_hybrid_apply_report.json` and rescan the copied world or copied zip when practical.
 - After `apply-direct-text` or legacy `apply-direct-nbt-strings`, inspect `mcmap_direct_text_apply_report.json` and rescan the copied world or copied zip when practical.
 - After export/apply, run `audit-english` on the copied world or copied zip when the target language is not English and the map has hardcoded text. Treat findings in `.mcfunction`, command `Command`, datapack JSON storage/dialogue paths, sign `messages`, `CustomName`, display/lore, and book/page paths as high-priority QA leads.
@@ -53,6 +54,7 @@ Report counts by:
 - Player-facing units intentionally left untranslated, with concrete reasons.
 - Files reported as pending binary parser coverage.
 - Resource-pack visual text asset hints, especially PNG textures and font provider JSON that language JSON cannot cover.
+- Existing map `resources.zip` paths and whether the export preserved/merged them.
 - Top repeated raw strings and top source files from `scan_review.md`.
 - Any encoding or font-rendering risks found during table round-trip, resource-pack export, copied-world apply, or in-game review.
 - Any escape-shape risks found during JSONL/TSV round-trip, resource-pack export, copied-world apply, or in-game review.
@@ -66,6 +68,7 @@ For any world patch, report:
 - Files changed.
 - Number of anchors changed.
 - Backup/copy path.
+- Resource-pack merge mode, base pack path, and overwritten entry count when `resources.zip` was embedded.
 - Parser confidence.
 - Known unhandled source kinds.
 - Commands or text components that could not be safely transformed.

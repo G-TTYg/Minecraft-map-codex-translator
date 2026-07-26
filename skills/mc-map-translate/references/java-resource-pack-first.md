@@ -9,8 +9,8 @@ Use these four names when explaining choices to the user. The internal unit `mod
 | User-facing mode | World data changed? | Main output | Covers | Does not cover |
 | --- | --- | --- | --- | --- |
 | `resource-pack-only` | No | Standalone resource-pack zip | Existing language keys, map-owned lang JSON, resources already designed for localization | Hardcoded command/sign/book/entity text, plain NBT strings, image/font pixels |
-| `embedded-pack-copy` | Copied world only | Copied map/world containing `resources.zip` | Same text coverage as `resource-pack-only`, but easier for players because the pack travels with the save | Hardcoded text unless it already uses translation keys |
-| `hybrid-keyed-copy` | Copied world/map patched | Copied map/world zip plus matching resource pack or embedded `resources.zip` | Existing resource-pack units plus supported hardcoded JSON text components, command JSON spans, sign segments, books, titles, bossbars, and datapack JSON text components that can become `translate` keys | Plain strings that are not JSON text components; image/font pixels |
+| `embedded-pack-copy` | Copied world only | Copied map/world containing `resources.zip` | Same text coverage as `resource-pack-only`, but easier for players because the pack travels with the save. If the map already has `resources.zip`, generated language files are merged into that copied pack. | Hardcoded text unless it already uses translation keys |
+| `hybrid-keyed-copy` | Copied world/map patched | Copied map/world zip plus matching resource pack or embedded `resources.zip` | Existing resource-pack units plus supported hardcoded JSON text components, command JSON spans, sign segments, books, titles, bossbars, and datapack JSON text components that can become `translate` keys. If embedded, preserve and merge any existing `resources.zip`. | Plain strings that are not JSON text components; image/font pixels |
 | `direct-text-copy` | Copied world/map patched | Copied map/world zip with direct literal text replacements | Supported plain command messages, SNBT/datapack JSON strings, and NBT strings that cannot be key-injected; may start from a hybrid-keyed copy when both source kinds exist | Higher-risk or unsupported anchors; image/font pixels |
 
 ## What "Full Translation" Means
@@ -27,6 +27,17 @@ Typical selection:
 Each mode may produce several artifacts, such as a map zip, a resource-pack zip, `resources.zip`, apply reports, residual-English audit, and visual asset findings. These are artifacts of the selected mode, not extra modes.
 
 If a map stores player-visible text as hardcoded literals, full localization usually requires a modified copied map. That modified copy is still safer than editing the original, but it is no longer a pure vanilla-original world export. If the user refuses any copied-map patching, report the remaining hardcoded text as uncovered by resource-pack-only export.
+
+## Maps With Existing `resources.zip`
+
+Many Java maps already ship a map-specific resource pack as `resources.zip` beside `level.dat`. Treat that file as the base pack.
+
+- Do not replace it with a translation-only pack by default; that would drop original textures, sounds, fonts, models, custom item models, and map UI art.
+- For `embedded-pack-copy` and embedded `hybrid-keyed-copy`, merge generated language files and generated hybrid keys into the copied existing `resources.zip`.
+- For `resource-pack-only`, decide whether to ship a small overlay pack or a merged full resource pack. Use an overlay only when players will also load the original map pack. Use a merged full pack when the translation pack is meant to replace or stand alone from the original pack.
+- Preserve map-owned assets unless the user explicitly requests asset localization or replacement.
+- Preserve the existing pack's `pack.mcmeta` during merge when it exists; it usually carries the map pack's compatibility metadata and description.
+- If the existing `resources.zip` is corrupt or unreadable, fail loudly instead of overwriting it silently.
 
 `resource-pack` unit support:
 
@@ -66,7 +77,7 @@ assets/<namespace>/lang/en_us.json
 assets/<namespace>/lang/<target_locale>.json
 ```
 
-For map-specific Java world embedding, zip the resource-pack contents with `pack.mcmeta` at the zip root and place the zip in the copied world as `resources.zip`.
+For map-specific Java world embedding, zip the resource-pack contents with `pack.mcmeta` at the zip root and place the zip in the copied world as `resources.zip`. If the copied world already has `resources.zip`, merge the generated pack over the existing copied pack by default.
 
 ## Coverage Rule
 
@@ -99,6 +110,6 @@ Do not hardcode `pack_format` unless the user specifies the Minecraft version. I
 
 ## Embedded World Export
 
-For Java worlds, a copied world can include `resources.zip` at the world root. This makes the map prompt/load its intended resource pack without asking every player to manually install a standalone pack. Still treat this as an export of a copied world, not as an in-place modification.
+For Java worlds, a copied world can include `resources.zip` at the world root. This makes the map prompt/load its intended resource pack without asking every player to manually install a standalone pack. Still treat this as an export of a copied world, not as an in-place modification. When the original world already includes `resources.zip`, the copied export should preserve it and overlay generated translation files.
 
 For zip input, `apply-hybrid-keys` and `apply-direct-text` can write copied output zips directly. For directory input, they can write copied directories; `apply-hybrid-keys` can also embed the generated resource pack as `resources.zip`.

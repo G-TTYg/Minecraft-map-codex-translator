@@ -31,12 +31,12 @@ The bundled tools do not call external translation services and do not translate
 
 - `inspect`: detect Java map/package markers and Bedrock-only markers.
 - `scan`: scan Java resource-pack language JSON, all datapack JSON text components, datapack JSON strings containing text components, `.mcfunction` JSON text components, `execute ... run ...` command chains, command JSON plain strings, quoted command/SNBT JSON text components, plain command messages, storage value strings, aggregated sign faces, supported `.dat` NBT, and supported `.mca` region chunks into `translation_units.jsonl`. Pass `--project-layout` to also create the indexed multi-file layout. `LastOutput` is excluded by default; pass `--include-last-output` only when intentionally auditing command logs. NBT strings are decoded as strict UTF-8; invalid bytes are reported instead of converted to replacement characters. `scan_report.json` includes function call graph context, suspicious text hints, visual text asset hints for PNG/font/model resources, and a `full_localization_recommendation` prompt.
-- `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy. Blocks selected rows that contain Unicode replacement characters. When `--resource-pack` is used, embeds `resources.zip` beside the copied world's `level.dat`, including packages whose zip root is a containing folder.
+- `apply-hybrid-keys`: copy/extract a Java world or map zip and inject generated `translate` keys into supported hardcoded JSON text components in the copy. Blocks selected rows that contain Unicode replacement characters. When `--resource-pack` is used, embeds `resources.zip` beside the copied world's `level.dat`, including packages whose zip root is a containing folder. If the copied world already has `resources.zip`, the generated pack is merged into it by default; pass `--replace-existing-resource-pack` only when the user explicitly wants replacement.
 - `apply-direct-text`: copy/extract a Java world or map zip and directly replace translated `embedded-direct` anchors in `.mcfunction`, datapack JSON, `.dat`, and `.mca` files when exact anchors match. It handles `command_plain_span`, plain `command_string_span`, `command_json_path`, datapack JSON `json_string_path`, and parsed NBT strings. Blocks selected rows that contain Unicode replacement characters.
 - `apply-direct-nbt-strings`: legacy alias for `apply-direct-text`.
 - `audit-english`: rescan an exported copied world or map zip for English-looking residual text in player-facing-ish `.mcfunction`, datapack JSON, command, sign, text, CustomName, display/lore, and book/page paths. It writes JSON plus a Markdown review and reports visual asset hints; it skips pure `translate` keys and protected tokens by default.
-- `zip-resource-pack`: zip a resource pack directory with the correct root.
-- `embed-resource-pack`: copy a Java world and add `resources.zip` to the copy.
+- `zip-resource-pack`: zip a resource pack directory with the correct root. Pass `--base-resource-pack <resources.zip>` to create a merged full pack from an existing map pack plus generated language files.
+- `embed-resource-pack`: copy a Java world and add or merge `resources.zip` in the copy. Existing copied `resources.zip` is preserved as the base pack unless `--replace-existing-resource-pack` is passed.
 
 ## Recommended Order
 
@@ -57,6 +57,8 @@ After the first scan, read `scan_review.md` and `scan_report.json`. Explain the 
 - `direct-text-copy`: copied map/world with direct literal replacements for supported plain command/SNBT/datapack JSON/NBT strings. It may start from a hybrid-keyed copy when both source kinds exist. Treat as maximum-coverage/high-risk and ask for explicit confirmation.
 
 If `full_localization_recommendation.suggest_full_translation_mode` is true, explain that "full translation" is not a fifth mode. Recommend the least invasive of the four modes that covers the scan: usually `hybrid-keyed-copy` when hardcoded JSON text exists, or `direct-text-copy` only when direct-only text remains and the user explicitly accepts the risk. Reports, audits, resource-pack zips, and copied-map zips are artifacts of the selected mode.
+
+If `scan_report.json` lists `map_resource_packs`, tell the user the map already ships a resource pack. Embedded exports should merge generated translation files into that pack so original assets are preserved. A standalone `resource-pack-only` zip may be either a small overlay pack or a merged full pack; choose merged full pack when users should not manage two packs.
 
 ## Encoding Discipline
 
@@ -99,6 +101,7 @@ For `resource-pack-only` export:
 ```bash
 python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack <workdir> --out <workdir>/exports/resource-pack --pack-format <pack_format> --target <target_locale>
 python skills/mc-map-translate/scripts/mcmap_java_tools.py zip-resource-pack <workdir>/exports/resource-pack --out <workdir>/exports/resource-pack.zip
+python skills/mc-map-translate/scripts/mcmap_java_tools.py zip-resource-pack <workdir>/exports/resource-pack --base-resource-pack <path-to-original-resources.zip> --out <workdir>/exports/merged-resource-pack.zip
 ```
 
 For `hybrid-keyed-copy` preparation:
@@ -107,7 +110,7 @@ For `hybrid-keyed-copy` preparation:
 python skills/mc-map-translate/scripts/mcmap_contract.py make-resource-pack <workdir> --out <workdir>/exports/hybrid-resource-pack --pack-format <pack_format> --target <target_locale> --include-hybrid-keys
 ```
 
-Then patch a copied world or copied map zip. Include `--resource-pack` when you want the copied directory output to contain `resources.zip`:
+Then patch a copied world or copied map zip. Include `--resource-pack` when you want the copied directory output to contain `resources.zip`. If the copied world already contains `resources.zip`, the command merges the generated pack into it:
 
 ```bash
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-hybrid-keys <world-or-zip> --translations <workdir> --out <workdir>/exports/world-keyed --resource-pack <workdir>/exports/hybrid-resource-pack
@@ -122,13 +125,15 @@ For `direct-text-copy` translated text that cannot be key-injected:
 python skills/mc-map-translate/scripts/mcmap_java_tools.py apply-direct-text <world-or-zip> --translations <workdir> --out <workdir>/exports/world-direct-text.zip --min-confidence low
 ```
 
-For `embedded-pack-copy`, ship a copied world with the pack embedded:
+For `embedded-pack-copy`, ship a copied world with the pack embedded. Existing `resources.zip` in the copied world is merged by default:
 
 ```bash
 python skills/mc-map-translate/scripts/mcmap_java_tools.py embed-resource-pack <world> --resource-pack <workdir>/exports/resource-pack --out <workdir>/exports/world-with-resources
 ```
 
 For copied map zips with a top-level containing folder, `resources.zip` must be placed in the actual Java world root, the same directory as `level.dat`, not necessarily the archive root. The apply report records `resource_pack_embed_path` for `apply-hybrid-keys --resource-pack`.
+
+Use `--replace-existing-resource-pack` only when intentionally discarding the copied map's original resource pack. This is rarely correct for real maps.
 
 ## Apply-Hybrid-Keys Behavior
 
